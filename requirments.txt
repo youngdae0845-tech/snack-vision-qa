@@ -1,7 +1,0 @@
-streamlit
-opencv-python-headless
-rembg
-numpy
-matplotlib
-pandas
-supabase
