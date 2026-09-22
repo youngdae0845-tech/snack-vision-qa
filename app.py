@@ -1,14 +1,15 @@
 import os
-import streamlit as st
+import gc
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from rembg import new_session, remove
 from supabase import create_client, Client
+import streamlit as st
 
 # ==========================================
-# 1. 수파베이스 설정 (로컬 / Railway 호환)
+# 1. 수파베이스 설정 (로컬 / Railway 환경 호환)
 # ==========================================
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
@@ -20,7 +21,7 @@ except Exception:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ==========================================
-# 2. 웹페이지 기본 설정 및 프리미엄 CSS
+# 2. 웹페이지 기본 설정 및 CSS 주입
 # ==========================================
 st.set_page_config(page_title="스낵 완제품 색차분석기", layout="wide")
 
@@ -75,14 +76,23 @@ st.markdown("""
 
 st.title("🏭 스낵 완제품 색차분석기")
 
-# 고화질 AI 모델 1회 상주 캐싱 (메모리 폭발 원천 방지)
+# 고화질 AI 세션 1회 상주 캐싱
 @st.cache_resource
-def load_high_quality_model():
+def load_ai_model():
     return new_session("u2net")
 
-ai_session = load_high_quality_model()
+ai_session = load_ai_model()
 
-# 화면 탭 분할
+# 스마트 리사이징 함수 (고화질 유지 + OOM 방지)
+def optimize_image_resolution(img, max_dim=1200):
+    h, w = img.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return img
+
 tab1, tab2 = st.tabs(["📸 스낵 색차 분석실", "📈 누적 품질 통계 (LOT)"])
 
 # ==========================================
@@ -97,13 +107,17 @@ with tab1:
         original_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
         if original_img is not None:
+            # 1. 고해상도 이미지 최적화 (메모리 폭발 방지 핵심)
+            original_img = optimize_image_resolution(original_img, max_dim=1200)
+
             with st.spinner("AI가 시즈닝 분포와 색차(ΔE)를 정밀 분석 중입니다..."):
-                # 고화질 원본 세션으로 정밀 배경 분리
+                # 2. 고화질 배경 제거
                 no_bg_img = remove(original_img, session=ai_session)
                 alpha_channel = no_bg_img[:, :, 3]
                 _, mask = cv2.threshold(alpha_channel, 10, 255, cv2.THRESH_BINARY)
                 black_bg_img = cv2.bitwise_and(original_img, original_img, mask=mask)
 
+                # 3. 색상 분석 (Lab 변환)
                 lab_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2LAB)
                 mean_lab = cv2.mean(lab_img, mask=mask)
                 mean_bgr = cv2.mean(original_img, mask=mask)
@@ -112,25 +126,34 @@ with tab1:
                 avg_a = mean_lab[1] - 128
                 avg_b = mean_lab[2] - 128
 
+                # 4. ΔE 행렬 연산
                 lab_float = lab_img.astype(np.float32)
-                delta_e_map = np.sqrt(((lab_float[:,:,0] - mean_lab[0]) * (100/255))**2 + 
-                                      (lab_float[:,:,1] - mean_lab[1])**2 + 
-                                      (lab_float[:,:,2] - mean_lab[2])**2)
-                
+                delta_e_map = np.sqrt(
+                    ((lab_float[:, :, 0] - mean_lab[0]) * (100 / 255)) ** 2 +
+                    (lab_float[:, :, 1] - mean_lab[1]) ** 2 +
+                    (lab_float[:, :, 2] - mean_lab[2]) ** 2
+                )
+
                 valid_pixels = delta_e_map[mask > 0]
                 mean_delta_e = float(np.mean(valid_pixels)) if len(valid_pixels) > 0 else 0
                 std_delta_e = float(np.std(valid_pixels)) if len(valid_pixels) > 0 else 0
 
-                a_channel = lab_float[:,:,1] - 128
-                min_redness, max_redness = 10.0, 28.0  
+                # 5. 히트맵 생성
+                a_channel = lab_float[:, :, 1] - 128
+                min_redness, max_redness = 10.0, 28.0
                 ratio = np.clip((a_channel - min_redness) / (max_redness - min_redness), 0, 1)
                 hue = np.uint8(60 - (ratio * 60))
-                sat, val = np.full_like(hue, 255), np.full_like(hue, 255)
+                sat = np.full_like(hue, 255)
+                val = np.full_like(hue, 255)
                 custom_bgr = cv2.cvtColor(cv2.merge([hue, sat, val]), cv2.COLOR_HSV2BGR)
                 blended_heatmap = cv2.addWeighted(black_bg_img, 0.6, custom_bgr, 0.4, 0)
                 heatmap_masked = cv2.bitwise_and(blended_heatmap, blended_heatmap, mask=mask)
 
-            # 분석 완료 후 시각화 레이아웃
+                # 중간 메모리 즉시 해제
+                del lab_float, delta_e_map, custom_bgr, blended_heatmap
+                gc.collect()
+
+            # 레이아웃 렌더링
             st.markdown("<br>", unsafe_allow_html=True)
             img_col1, img_col2 = st.columns(2)
             with img_col1:
@@ -160,10 +183,11 @@ with tab1:
                 ax.grid(axis='y', linestyle='--', alpha=0.3)
                 ax.spines['top'].set_visible(False)
                 ax.spines['right'].set_visible(False)
-                fig.patch.set_facecolor('#F4F6F9') 
+                fig.patch.set_facecolor('#F4F6F9')
                 ax.set_facecolor('#F4F6F9')
                 plt.tight_layout()
                 st.pyplot(fig)
+                plt.close(fig)
 
             with col_map:
                 st.markdown("**HEATMAP (Seasoning/Burn)**")
@@ -182,7 +206,7 @@ with tab1:
 
             st.markdown("---")
             lot_input = st.text_input("LOT NUMBER", "LOT-2026-005")
-            
+
             status = "NG" if mean_delta_e >= 20 else "OK"
             defect_type = "색상 불균일(시즈닝 뭉침)" if status == "NG" else "정상"
 
@@ -208,17 +232,17 @@ with tab1:
 # ==========================================
 with tab2:
     st.markdown("##### 📊 실시간 누적 품질 통계")
-    
+
     if st.button("🔄 실시간 DB 동기화"):
         st.rerun()
 
     try:
         response = supabase.table("snack_color_logs").select("*").order("created_at", desc=False).execute()
         data = response.data
-        
+
         if data:
             df = pd.DataFrame(data)
-            
+
             total_count = len(df)
             ng_count = len(df[df['status'] == 'NG'])
             ng_rate = (ng_count / total_count) * 100 if total_count > 0 else 0
@@ -232,7 +256,7 @@ with tab2:
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown("**📈 LOT별 색상 편차(ΔE) 추이**")
             st.line_chart(df.set_index('lot_number')['delta_e'], color="#112A46")
-            
+
             st.markdown("**📋 전체 검사 로그 DB**")
             st.dataframe(df[['created_at', 'lot_number', 'avg_l', 'avg_a', 'avg_b', 'delta_e', 'defect_type', 'status']], use_container_width=True)
 
