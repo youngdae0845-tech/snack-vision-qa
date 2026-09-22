@@ -1,7 +1,9 @@
 streamlit
 opencv-python-headless
-rembg
 numpy
 matplotlib
 pandas
+rembg
+onnxruntime
 supabase
+Pillow
