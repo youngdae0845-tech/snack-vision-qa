@@ -9,8 +9,8 @@ from supabase import create_client, Client
 # ==========================================
 # 1. 수파베이스 설정 
 # ==========================================
-SUPABASE_URL = st.secrets["https://yxetrhoifimlblursgbi.supabase.co"]
-SUPABASE_KEY = st.secrets["sb_publishable_IB_TxAiC7W46BviCFrtVyQ_NEPdsI_V"]
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ==========================================
