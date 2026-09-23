@@ -12,7 +12,7 @@ from supabase import create_client
 
 st.set_page_config(
     page_title="Snack Vision QC",
-    page_icon="🧪",
+    page_icon="SV",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -302,21 +302,11 @@ def analyze_image(original_img, session):
     return result
 
 
-# ---------------------------------------------------------------------------
-# Presentation helpers — visual layer only. None of these touch analysis data.
-# ---------------------------------------------------------------------------
-
-STATUS_ICON = {"success": "✓", "warning": "!", "danger": "✕"}
-
-
 def render_kpi(label, value, helper, tone="neutral"):
     st.markdown(
         f"""
         <div class="kpi-card kpi-{tone}">
-            <div class="kpi-top">
-                <span class="kpi-label">{label}</span>
-                <span class="kpi-dot kpi-dot-{tone}"></span>
-            </div>
+            <div class="kpi-label">{label}</div>
             <div class="kpi-value">{value}</div>
             <div class="kpi-helper">{helper}</div>
         </div>
@@ -326,14 +316,10 @@ def render_kpi(label, value, helper, tone="neutral"):
 
 
 def render_status_panel(meta, mean_delta_e, std_delta_e, p95_delta_e):
-    icon = STATUS_ICON.get(meta["tone"], "•")
     st.markdown(
         f"""
         <div class="status-panel status-{meta["tone"]}">
-            <div class="status-top">
-                <span class="status-eyebrow">Final QA Decision</span>
-                <span class="status-icon">{icon}</span>
-            </div>
+            <div class="status-eyebrow">Final QA Decision</div>
             <div class="status-main">{meta["status"]}</div>
             <div class="status-label">{meta["label"]}</div>
             <div class="status-copy">{meta["message"]}</div>
@@ -360,7 +346,7 @@ def render_color_chip(mean_bgr, avg_l, avg_a, avg_b):
             <div class="color-swatch" style="background: rgb({r}, {g}, {b});"></div>
             <div>
                 <div class="color-title">Average Product Color</div>
-                <div class="color-values">L {avg_l:.1f} &nbsp;/&nbsp; a {avg_a:.1f} &nbsp;/&nbsp; b {avg_b:.1f}</div>
+                <div class="color-values">L {avg_l:.1f} / a {avg_a:.1f} / b {avg_b:.1f}</div>
                 <div class="color-helper">정밀 분석 마스크 내부 픽셀 기준</div>
             </div>
         </div>
@@ -381,10 +367,6 @@ def render_panel_title(title, caption):
     )
 
 
-def render_media_label(title):
-    st.markdown(f'<div class="media-label">{title}</div>', unsafe_allow_html=True)
-
-
 def safe_table_columns(df, columns):
     existing = [column for column in columns if column in df.columns]
     return df[existing] if existing else df
@@ -395,381 +377,211 @@ supabase = get_supabase_client()
 st.markdown(
     """
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
-
         :root {
-            --bg: #f2f3f9;
-            --surface: #ffffff;
-            --surface-soft: #f8f9fd;
-            --border: #e4e7f1;
-            --border-strong: #d8dcec;
-            --ink: #11132a;
-            --ink-secondary: #5b6083;
-            --ink-muted: #9296b0;
-            --navy: #10162e;
-            --navy-soft: #1c2648;
-            --brand: #4338ca;
-            --brand-strong: #352cad;
-            --brand-soft: #edeafc;
-            --success: #0ca34a;
-            --success-strong: #0a7a38;
-            --success-soft: #e6f7ec;
-            --warning: #d97706;
-            --warning-strong: #b45309;
-            --warning-soft: #fef3e2;
-            --danger: #dc2626;
-            --danger-strong: #b91c1c;
-            --danger-soft: #fde9e9;
-            --radius-lg: 18px;
-            --radius-md: 14px;
-            --radius-sm: 10px;
-            --shadow-sm: 0 1px 2px rgba(17, 19, 42, 0.04);
-            --shadow-md: 0 10px 26px rgba(17, 19, 42, 0.07);
-            --shadow-lg: 0 22px 48px rgba(17, 19, 42, 0.10);
-        }
-
-        html, body, [class*="css"] {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            --bg: #f5f7fb;
+            --panel: #ffffff;
+            --ink: #111827;
+            --muted: #667085;
+            --line: #e5e7eb;
+            --navy: #0f2742;
+            --blue: #2563eb;
+            --amber: #d97706;
+            --green: #15803d;
+            --red: #dc2626;
         }
 
         .stApp {
-            background:
-                radial-gradient(1100px 420px at 8% -8%, rgba(67, 56, 202, 0.07), transparent 60%),
-                var(--bg);
+            background: var(--bg);
             color: var(--ink);
         }
 
         .block-container {
-            max-width: 1380px;
-            padding-top: 1.6rem;
-            padding-bottom: 3.5rem;
+            max-width: 1360px;
+            padding-top: 1.4rem;
+            padding-bottom: 3rem;
         }
 
         #MainMenu, footer, header {
             visibility: hidden;
         }
 
-        h1, h2, h3, h4, h5, strong {
-            color: var(--ink);
-        }
-
-        /* ---------- Header ---------- */
-
         .report-header {
-            position: relative;
             display: flex;
             justify-content: space-between;
             align-items: flex-start;
-            gap: 28px;
-            padding: 30px 32px 26px;
-            margin-bottom: 22px;
-            background: linear-gradient(180deg, #ffffff 0%, #fbfbfe 100%);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-lg);
-            box-shadow: var(--shadow-lg);
-            overflow: hidden;
-        }
-
-        .report-header::before {
-            content: "";
-            position: absolute;
-            top: 0; left: 0; right: 0;
-            height: 4px;
-            background: linear-gradient(90deg, var(--brand) 0%, #7c6ff0 45%, #22c1a1 100%);
+            gap: 24px;
+            padding: 24px 26px;
+            margin-bottom: 18px;
+            background: #ffffff;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
         }
 
         .brand-mark {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
             font-size: 12px;
             font-weight: 800;
-            color: var(--brand);
+            color: var(--blue);
             text-transform: uppercase;
-            letter-spacing: .09em;
-            margin-bottom: 10px;
-        }
-
-        .brand-mark::before {
-            content: "";
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background: var(--brand);
-            box-shadow: 0 0 0 4px var(--brand-soft);
+            letter-spacing: .08em;
+            margin-bottom: 8px;
         }
 
         .report-title {
             font-size: 30px;
-            line-height: 1.2;
-            font-weight: 800;
+            line-height: 1.15;
+            font-weight: 850;
             color: var(--navy);
-            letter-spacing: -0.01em;
-            margin-bottom: 10px;
+            margin-bottom: 8px;
         }
 
         .report-subtitle {
             font-size: 14px;
-            line-height: 1.6;
-            color: var(--ink-secondary);
-            max-width: 760px;
+            color: var(--muted);
+            max-width: 820px;
         }
 
-        .spec-chips {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            min-width: 280px;
-            padding: 16px 18px;
-            border: 1px solid var(--border);
-            border-radius: var(--radius-md);
-            background: var(--surface-soft);
+        .model-strip {
+            min-width: 300px;
+            padding: 14px 16px;
+            border: 1px solid #dbe4f0;
+            border-radius: 8px;
+            background: #f8fafc;
         }
 
-        .spec-chips-title {
-            font-size: 11px;
+        .model-strip div:first-child {
+            font-size: 12px;
             font-weight: 800;
-            color: var(--ink-muted);
-            text-transform: uppercase;
-            letter-spacing: .08em;
-            margin-bottom: 2px;
-        }
-
-        .spec-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 12.5px;
-            padding: 5px 0;
-            border-top: 1px dashed var(--border);
-        }
-
-        .spec-row:first-of-type { border-top: none; }
-
-        .spec-row span:first-child {
-            color: var(--ink-secondary);
-        }
-
-        .spec-row span:last-child {
-            font-weight: 700;
             color: var(--navy);
-            font-variant-numeric: tabular-nums;
+            margin-bottom: 8px;
         }
 
-        .spec-pill {
-            display: inline-block;
-            padding: 2px 9px;
-            border-radius: 999px;
-            font-size: 11px;
-            font-weight: 800;
+        .model-strip span {
+            display: block;
+            font-size: 12px;
+            color: var(--muted);
+            line-height: 1.7;
         }
-
-        .spec-pill-on { background: var(--success-soft); color: var(--success-strong); }
-        .spec-pill-off { background: var(--surface); color: var(--ink-muted); border: 1px solid var(--border-strong); }
-
-        /* ---------- Upload zone ---------- */
 
         .upload-note {
-            position: relative;
-            background: var(--surface);
-            border: 1.5px dashed var(--border-strong);
-            border-radius: var(--radius-md);
-            padding: 24px 22px;
-            margin: 4px 0 18px;
-            transition: border-color .15s ease;
+            background: #ffffff;
+            border: 1px dashed #b6c2d2;
+            border-radius: 10px;
+            padding: 22px;
+            margin: 8px 0 16px;
         }
 
         .upload-note strong {
             display: block;
             color: var(--navy);
             font-size: 17px;
-            font-weight: 800;
             margin-bottom: 6px;
         }
 
         .upload-note span {
-            color: var(--ink-secondary);
+            color: var(--muted);
             font-size: 13px;
-            line-height: 1.55;
         }
 
-        /* ---------- Section titles / cards ---------- */
-
         .panel-title {
-            margin: 10px 0 14px;
+            margin: 8px 0 12px;
         }
 
         .panel-heading {
             font-size: 15px;
-            font-weight: 800;
+            font-weight: 850;
             color: var(--navy);
-            letter-spacing: -0.01em;
         }
 
         .panel-caption {
-            font-size: 12.5px;
-            color: var(--ink-muted);
-            margin-top: 3px;
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 2px;
         }
 
         .section-card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-lg);
-            padding: 22px;
-            box-shadow: var(--shadow-md);
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 18px;
+            box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
         }
-
-        .empty-state {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
-            gap: 10px;
-            min-height: 260px;
-            justify-content: center;
-        }
-
-        .empty-state-badge {
-            width: 46px;
-            height: 46px;
-            border-radius: 13px;
-            background: var(--brand-soft);
-            color: var(--brand);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 20px;
-            font-weight: 800;
-            margin-bottom: 6px;
-        }
-
-        /* ---------- KPI cards ---------- */
 
         .kpi-card {
-            min-height: 122px;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-left: 4px solid var(--border-strong);
-            border-radius: var(--radius-md);
-            padding: 17px 18px;
-            box-shadow: var(--shadow-sm);
-            transition: box-shadow .15s ease, transform .15s ease;
+            min-height: 118px;
+            background: #ffffff;
+            border: 1px solid var(--line);
+            border-top: 4px solid #94a3b8;
+            border-radius: 10px;
+            padding: 16px;
+            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
         }
 
-        .kpi-card:hover {
-            box-shadow: var(--shadow-md);
-            transform: translateY(-1px);
-        }
-
-        .kpi-success { border-left-color: var(--success); }
-        .kpi-warning { border-left-color: var(--warning); }
-        .kpi-danger  { border-left-color: var(--danger); }
-        .kpi-blue    { border-left-color: var(--brand); }
-
-        .kpi-top {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
+        .kpi-success { border-top-color: var(--green); }
+        .kpi-warning { border-top-color: var(--amber); }
+        .kpi-danger { border-top-color: var(--red); }
+        .kpi-blue { border-top-color: var(--blue); }
 
         .kpi-label {
-            font-size: 11.5px;
-            color: var(--ink-muted);
-            font-weight: 800;
+            font-size: 12px;
+            color: var(--muted);
+            font-weight: 750;
             text-transform: uppercase;
-            letter-spacing: .05em;
+            letter-spacing: .04em;
         }
-
-        .kpi-dot {
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background: var(--border-strong);
-        }
-
-        .kpi-dot-success { background: var(--success); }
-        .kpi-dot-warning { background: var(--warning); }
-        .kpi-dot-danger  { background: var(--danger); }
-        .kpi-dot-blue    { background: var(--brand); }
 
         .kpi-value {
-            font-size: 27px;
+            font-size: 28px;
             line-height: 1.2;
-            font-weight: 800;
+            font-weight: 850;
             color: var(--ink);
-            margin-top: 10px;
-            letter-spacing: -0.01em;
+            margin-top: 8px;
         }
 
         .kpi-helper {
             font-size: 12px;
-            color: var(--ink-muted);
+            color: var(--muted);
             margin-top: 8px;
         }
 
-        /* ---------- Status panel ---------- */
-
         .status-panel {
-            position: relative;
             min-height: 330px;
-            border-radius: var(--radius-lg);
-            padding: 24px 24px 22px;
+            border-radius: 10px;
+            padding: 22px;
             color: #ffffff;
-            box-shadow: var(--shadow-lg);
-            overflow: hidden;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
         }
 
-        .status-success { background: linear-gradient(155deg, #0b7a3d 0%, #0a5c30 100%); }
-        .status-warning { background: linear-gradient(155deg, #b45309 0%, #8a3e07 100%); }
-        .status-danger  { background: linear-gradient(155deg, #c62828 0%, #931f1f 100%); }
-
-        .status-top {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
+        .status-success { background: #14532d; }
+        .status-warning { background: #92400e; }
+        .status-danger { background: #991b1b; }
 
         .status-eyebrow {
             font-size: 11px;
-            font-weight: 800;
+            font-weight: 850;
             text-transform: uppercase;
-            letter-spacing: .09em;
-            opacity: .8;
-        }
-
-        .status-icon {
-            width: 30px;
-            height: 30px;
-            border-radius: 50%;
-            background: rgba(255, 255, 255, .16);
-            border: 1px solid rgba(255, 255, 255, .28);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 15px;
-            font-weight: 800;
+            letter-spacing: .08em;
+            opacity: .78;
         }
 
         .status-main {
-            font-size: 52px;
+            font-size: 54px;
             line-height: 1;
             font-weight: 900;
-            margin-top: 20px;
-            letter-spacing: -0.02em;
+            margin-top: 18px;
         }
 
         .status-label {
-            font-size: 17px;
-            font-weight: 700;
+            font-size: 18px;
+            font-weight: 800;
             margin-top: 8px;
-            opacity: .96;
         }
 
         .status-copy {
             font-size: 13px;
-            line-height: 1.6;
-            opacity: .88;
-            margin-top: 14px;
+            line-height: 1.55;
+            opacity: .9;
+            margin-top: 12px;
         }
 
         .status-grid {
@@ -780,187 +592,107 @@ st.markdown(
         }
 
         .status-grid div {
-            padding: 11px 12px;
-            background: rgba(255, 255, 255, .12);
-            border: 1px solid rgba(255, 255, 255, .16);
-            border-radius: 10px;
+            padding: 10px;
+            background: rgba(255, 255, 255, .13);
+            border: 1px solid rgba(255, 255, 255, .18);
+            border-radius: 8px;
         }
 
         .status-grid span {
             display: block;
             font-size: 11px;
-            opacity: .8;
+            opacity: .75;
         }
 
         .status-grid strong {
             display: block;
-            font-size: 19px;
+            font-size: 20px;
             margin-top: 4px;
-            color: #ffffff;
-            font-variant-numeric: tabular-nums;
         }
-
-        /* ---------- Color chip ---------- */
 
         .color-chip-card {
             display: grid;
-            grid-template-columns: 104px 1fr;
-            gap: 16px;
+            grid-template-columns: 106px 1fr;
+            gap: 14px;
             align-items: center;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-md);
-            padding: 16px;
+            background: #ffffff;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 14px;
             min-height: 136px;
-            box-shadow: var(--shadow-sm);
         }
 
         .color-swatch {
-            width: 104px;
-            height: 104px;
-            border-radius: 12px;
-            border: 1px solid rgba(17, 19, 42, .10);
-            box-shadow: inset 0 0 0 3px rgba(255, 255, 255, .6), var(--shadow-sm);
+            width: 106px;
+            height: 106px;
+            border-radius: 8px;
+            border: 1px solid rgba(15, 23, 42, .14);
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .25);
         }
 
         .color-title {
-            font-size: 12.5px;
-            color: var(--ink-muted);
+            font-size: 13px;
+            color: var(--muted);
             font-weight: 800;
             text-transform: uppercase;
-            letter-spacing: .05em;
+            letter-spacing: .04em;
         }
 
         .color-values {
-            font-size: 20px;
-            font-weight: 800;
+            font-size: 21px;
+            font-weight: 850;
             color: var(--ink);
             margin-top: 8px;
-            font-variant-numeric: tabular-nums;
         }
 
         .color-helper {
             font-size: 12px;
-            color: var(--ink-muted);
-            margin-top: 7px;
-        }
-
-        /* ---------- Media gallery ---------- */
-
-        .media-label {
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-            font-size: 12.5px;
-            font-weight: 800;
-            color: var(--navy);
-            margin: 2px 0 8px;
-        }
-
-        .media-label::before {
-            content: "";
-            width: 6px;
-            height: 6px;
-            border-radius: 2px;
-            background: var(--brand);
+            color: var(--muted);
+            margin-top: 6px;
         }
 
         [data-testid="stImage"] {
-            border-radius: var(--radius-md);
+            border-radius: 10px;
             overflow: hidden;
-            border: 1px solid var(--border);
-            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--line);
+            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
         }
-
-        [data-testid="stImage"] img {
-            display: block;
-        }
-
-        /* ---------- Tabs ---------- */
 
         .stTabs [data-baseweb="tab-list"] {
             gap: 8px;
-            margin-bottom: 14px;
-            border-bottom: none;
+            margin-bottom: 10px;
         }
 
         .stTabs [data-baseweb="tab"] {
             height: 44px;
-            padding: 0 20px;
-            border-radius: 999px;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            color: var(--ink-secondary);
-            font-weight: 700;
-            transition: all .15s ease;
-        }
-
-        .stTabs [data-baseweb="tab"]:hover {
-            border-color: var(--border-strong);
-            color: var(--ink);
+            padding: 0 18px;
+            border-radius: 8px;
+            background: #ffffff;
+            border: 1px solid var(--line);
+            color: var(--muted);
+            font-weight: 750;
         }
 
         .stTabs [aria-selected="true"] {
             color: #ffffff !important;
-            background: var(--navy) !important;
-            border-color: var(--navy) !important;
-            box-shadow: var(--shadow-sm);
-        }
-
-        .stTabs [data-baseweb="tab-highlight"],
-        .stTabs [data-baseweb="tab-border"] {
-            display: none;
-        }
-
-        /* ---------- Inputs & buttons ---------- */
-
-        .stTextInput input, .stTextInput > div > div {
-            border-radius: var(--radius-sm) !important;
+            background: var(--navy);
+            border-color: var(--navy);
         }
 
         .stButton > button {
             width: 100%;
             min-height: 44px;
-            border-radius: var(--radius-sm);
+            border-radius: 8px;
             border: 1px solid var(--navy);
             background: var(--navy);
             color: #ffffff;
             font-weight: 800;
-            letter-spacing: .01em;
-            transition: all .15s ease;
         }
 
         .stButton > button:hover {
-            border-color: var(--brand);
-            background: var(--brand);
+            border-color: #1d4ed8;
+            background: #1d4ed8;
             color: #ffffff;
-            transform: translateY(-1px);
-            box-shadow: var(--shadow-md);
-        }
-
-        .stButton > button:active {
-            transform: translateY(0);
-        }
-
-        [data-testid="stExpander"] {
-            border: 1px solid var(--border);
-            border-radius: var(--radius-md);
-            background: var(--surface);
-            box-shadow: var(--shadow-sm);
-        }
-
-        [data-testid="stDataFrame"] {
-            border-radius: var(--radius-md);
-            overflow: hidden;
-            border: 1px solid var(--border);
-        }
-
-        .stAlert {
-            border-radius: var(--radius-sm);
-        }
-
-        hr {
-            border-color: var(--border);
         }
     </style>
     """,
@@ -969,11 +701,7 @@ st.markdown(
 
 
 target_lab = get_target_lab()
-target_text = "이미지 평균" if target_lab is None else f"L {target_lab[0]:.1f} / a {target_lab[1]:.1f} / b {target_lab[2]:.1f}"
-color_rescue_pill = (
-    '<span class="spec-pill spec-pill-on">ON</span>' if USE_COLOR_RESCUE_MASK
-    else '<span class="spec-pill spec-pill-off">OFF</span>'
-)
+target_text = "image mean" if target_lab is None else f"L {target_lab[0]:.1f} / a {target_lab[1]:.1f} / b {target_lab[2]:.1f}"
 
 st.markdown(
     f"""
@@ -986,13 +714,13 @@ st.markdown(
                 float Lab 색공간 기준으로 Delta E 분포와 P95 편차를 산출합니다.
             </div>
         </div>
-        <div class="spec-chips">
-            <div class="spec-chips-title">Precision Profile</div>
-            <div class="spec-row"><span>Mask resolution</span><span>{MASK_DIM}px</span></div>
-            <div class="spec-row"><span>Color analysis</span><span>{ANALYSIS_DIM}px</span></div>
-            <div class="spec-row"><span>Segmentation model</span><span>{REMBG_MODEL}</span></div>
-            <div class="spec-row"><span>Color rescue mask</span>{color_rescue_pill}</div>
-            <div class="spec-row"><span>Reference</span><span>{target_text}</span></div>
+        <div class="model-strip">
+            <div>Precision Profile</div>
+            <span>Mask resolution: {MASK_DIM}px</span>
+            <span>Color analysis: {ANALYSIS_DIM}px</span>
+            <span>Segmentation model: {REMBG_MODEL}</span>
+            <span>Color rescue mask: {"on" if USE_COLOR_RESCUE_MASK else "off"}</span>
+            <span>Reference: {target_text}</span>
         </div>
     </div>
     """,
@@ -1041,12 +769,9 @@ with tab1:
             st.markdown(
                 """
                 <div class="section-card">
-                    <div class="empty-state">
-                        <div class="empty-state-badge">QC</div>
-                        <div class="panel-heading">분석 결과 대기</div>
-                        <div class="panel-caption">
-                            이미지를 업로드하면 고정밀 마스킹, Delta E 분포, 평균 Lab, 판정 결과가 표시됩니다.
-                        </div>
+                    <div class="panel-heading">분석 결과 대기</div>
+                    <div class="panel-caption" style="margin-top: 8px;">
+                        이미지를 업로드하면 고정밀 마스킹, Delta E 분포, 평균 Lab, 판정 결과가 표시됩니다.
                     </div>
                 </div>
                 """,
@@ -1104,18 +829,15 @@ with tab1:
                     render_color_chip(mean_bgr, avg_l, avg_a, avg_b)
 
                     fig, ax = plt.subplots(figsize=(4.8, 3.2))
-                    ax.hist(delta_values, bins=80, color="#4338ca", edgecolor="#ffffff", linewidth=0.35, alpha=0.92)
+                    ax.hist(delta_values, bins=80, color="#0f2742", edgecolor="white", linewidth=0.35)
                     ax.axvline(mean_delta_e, color="#d97706", linewidth=2, label="Mean")
                     ax.axvline(p95_delta_e, color="#dc2626", linewidth=2, label="P95")
-                    ax.set_xlabel("Delta E", fontsize=9, color="#5b6083")
-                    ax.set_ylabel("Pixel Count", fontsize=9, color="#5b6083")
-                    ax.tick_params(colors="#9296b0", labelsize=8)
-                    ax.grid(axis="y", linestyle="--", alpha=0.25, color="#d8dcec")
-                    ax.legend(frameon=False, fontsize=8, labelcolor="#11132a")
+                    ax.set_xlabel("Delta E", fontsize=9)
+                    ax.set_ylabel("Pixel Count", fontsize=9)
+                    ax.grid(axis="y", linestyle="--", alpha=0.24)
+                    ax.legend(frameon=False, fontsize=8)
                     ax.spines["top"].set_visible(False)
                     ax.spines["right"].set_visible(False)
-                    ax.spines["left"].set_color("#d8dcec")
-                    ax.spines["bottom"].set_color("#d8dcec")
                     fig.patch.set_facecolor("#ffffff")
                     ax.set_facecolor("#ffffff")
                     plt.tight_layout()
@@ -1125,27 +847,27 @@ with tab1:
                 render_panel_title("시각 검증", "AI 마스크와 색상 보조 마스크가 합쳐진 최종 제품 영역을 확인합니다.")
                 img_col1, img_col2 = st.columns(2, gap="medium")
                 with img_col1:
-                    render_media_label("Raw Image")
+                    st.markdown("**Raw Image**")
                     st.image(cv2.cvtColor(analysis_img, cv2.COLOR_BGR2RGB), use_container_width=True)
                 with img_col2:
-                    render_media_label("Final Product Mask")
+                    st.markdown("**Final Product Mask**")
                     st.image(cv2.cvtColor(visual_masked_img, cv2.COLOR_BGR2RGB), use_container_width=True)
 
                 img_col3, img_col4 = st.columns(2, gap="medium")
                 with img_col3:
-                    render_media_label("Analysis Core Mask")
+                    st.markdown("**Analysis Core Mask**")
                     st.image(cv2.cvtColor(core_masked_img, cv2.COLOR_BGR2RGB), use_container_width=True)
                 with img_col4:
-                    render_media_label("Delta E Heatmap")
+                    st.markdown("**Delta E Heatmap**")
                     st.image(cv2.cvtColor(heatmap_masked, cv2.COLOR_BGR2RGB), use_container_width=True)
 
                 with st.expander("마스크 진단 보기"):
                     diag_col1, diag_col2 = st.columns(2, gap="medium")
                     with diag_col1:
-                        render_media_label("AI Mask Only")
+                        st.markdown("**AI Mask Only**")
                         st.image(cv2.cvtColor(ai_masked_img, cv2.COLOR_BGR2RGB), use_container_width=True)
                     with diag_col2:
-                        render_media_label("Color Rescue Mask Only")
+                        st.markdown("**Color Rescue Mask Only**")
                         st.image(cv2.cvtColor(color_rescue_img, cv2.COLOR_BGR2RGB), use_container_width=True)
 
                 st.write("")
@@ -1229,7 +951,7 @@ with tab2:
                 st.write("")
                 if "lot_number" in df.columns and "delta_e" in df.columns:
                     chart_df = df[["lot_number", "delta_e"]].set_index("lot_number")
-                    st.line_chart(chart_df, color="#4338ca")
+                    st.line_chart(chart_df, color="#0f2742")
 
                 st.write("")
                 st.dataframe(
