@@ -12,7 +12,7 @@ from supabase import create_client
 
 st.set_page_config(
     page_title="Snack Vision QC",
-    page_icon="SV",
+    page_icon="🧪",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -44,14 +44,22 @@ def get_float_config(name, default):
 SUPABASE_URL = get_config("SUPABASE_URL")
 SUPABASE_KEY = get_config("SUPABASE_KEY")
 
+# Accuracy-first defaults for paid Railway resources.
 MASK_DIM = get_int_config("MASK_DIM", 2200)
 ANALYSIS_DIM = get_int_config("ANALYSIS_DIM", 2600)
-REMBG_MODEL = get_config("REMBG_MODEL", "isnet-general-use")
 
-MASK_THRESHOLD = get_int_config("MASK_THRESHOLD", 128)
+# u2net is less likely than isnet-general-use to keep only a few "salient" pieces.
+REMBG_MODEL = get_config("REMBG_MODEL", "u2net")
+
+# Low alpha threshold keeps weakly detected snack regions instead of deleting them.
+MASK_THRESHOLD = get_int_config("MASK_THRESHOLD", 24)
 MASK_KERNEL_SIZE = get_int_config("MASK_KERNEL_SIZE", 5)
 MASK_CLOSE_ITER = get_int_config("MASK_CLOSE_ITER", 1)
-MASK_ERODE_ITER = get_int_config("MASK_ERODE_ITER", 1)
+MASK_ERODE_ITER = get_int_config("MASK_ERODE_ITER", 0)
+
+# The color mask rescues yellow/orange snack pixels when AI segmentation is too selective.
+USE_COLOR_RESCUE_MASK = get_config("USE_COLOR_RESCUE_MASK", "true").lower() != "false"
+COLOR_MASK_MIN_AREA_RATIO = get_float_config("COLOR_MASK_MIN_AREA_RATIO", 0.02)
 
 REVIEW_THRESHOLD = get_float_config("REVIEW_THRESHOLD", 10.0)
 NG_THRESHOLD = get_float_config("NG_THRESHOLD", 20.0)
@@ -99,6 +107,47 @@ def normalize_kernel_size(size):
     return size if size % 2 == 1 else size + 1
 
 
+def largest_components_mask(mask, min_area_ratio=0.0002):
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if num_labels <= 1:
+        return mask
+
+    image_area = mask.shape[0] * mask.shape[1]
+    min_area = max(24, int(image_area * min_area_ratio))
+    cleaned = np.zeros_like(mask)
+
+    for label in range(1, num_labels):
+        area = stats[label, cv2.CC_STAT_AREA]
+        if area >= min_area:
+            cleaned[labels == label] = 255
+
+    return cleaned
+
+
+def create_snack_color_mask(img):
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+
+    bgr_float = img.astype(np.float32) / 255.0
+    lab = cv2.cvtColor(bgr_float, cv2.COLOR_BGR2LAB)
+    l_channel = lab[:, :, 0]
+    a_channel = lab[:, :, 1]
+    b_channel = lab[:, :, 2]
+
+    orange_hue = (h >= 3) & (h <= 48) & (s >= 28) & (v >= 35)
+    warm_lab = (l_channel >= 18) & (a_channel >= -8) & (b_channel >= 8) & (s >= 18)
+    bright_yellow = (h >= 12) & (h <= 58) & (s >= 18) & (v >= 65)
+
+    color_mask = (orange_hue | warm_lab | bright_yellow).astype(np.uint8) * 255
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    color_mask = largest_components_mask(color_mask)
+
+    return color_mask
+
+
 def create_precise_masks(original_img, analysis_img, session):
     mask_input_img = resize_by_max_dim(original_img, MASK_DIM)
     no_bg_img = remove(mask_input_img, session=session)
@@ -113,12 +162,21 @@ def create_precise_masks(original_img, analysis_img, session):
         interpolation=cv2.INTER_CUBIC,
     )
 
-    _, display_mask = cv2.threshold(
+    _, ai_mask = cv2.threshold(
         resized_alpha,
         MASK_THRESHOLD,
         255,
         cv2.THRESH_BINARY,
     )
+
+    display_mask = ai_mask
+    color_rescue_mask = None
+    if USE_COLOR_RESCUE_MASK:
+        color_rescue_mask = create_snack_color_mask(analysis_img)
+        color_area_ratio = np.count_nonzero(color_rescue_mask) / color_rescue_mask.size
+
+        if color_area_ratio >= COLOR_MASK_MIN_AREA_RATIO:
+            display_mask = cv2.bitwise_or(display_mask, color_rescue_mask)
 
     kernel_size = normalize_kernel_size(MASK_KERNEL_SIZE)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
@@ -131,11 +189,13 @@ def create_precise_masks(original_img, analysis_img, session):
             iterations=MASK_CLOSE_ITER,
         )
 
+    display_mask = largest_components_mask(display_mask)
+
     analysis_mask = display_mask.copy()
     if MASK_ERODE_ITER > 0:
         analysis_mask = cv2.erode(analysis_mask, kernel, iterations=MASK_ERODE_ITER)
 
-    return display_mask, analysis_mask
+    return display_mask, analysis_mask, ai_mask, color_rescue_mask
 
 
 def calculate_status(mean_delta_e):
@@ -163,7 +223,11 @@ def calculate_status(mean_delta_e):
 
 def analyze_image(original_img, session):
     analysis_img = resize_by_max_dim(original_img, ANALYSIS_DIM)
-    display_mask, analysis_mask = create_precise_masks(original_img, analysis_img, session)
+    display_mask, analysis_mask, ai_mask, color_rescue_mask = create_precise_masks(
+        original_img,
+        analysis_img,
+        session,
+    )
 
     core_pixels = analysis_mask > 0
     if np.count_nonzero(core_pixels) == 0:
@@ -171,6 +235,12 @@ def analyze_image(original_img, session):
 
     visual_masked_img = cv2.bitwise_and(analysis_img, analysis_img, mask=display_mask)
     core_masked_img = cv2.bitwise_and(analysis_img, analysis_img, mask=analysis_mask)
+
+    ai_masked_img = cv2.bitwise_and(analysis_img, analysis_img, mask=ai_mask)
+    if color_rescue_mask is None:
+        color_rescue_img = np.zeros_like(analysis_img)
+    else:
+        color_rescue_img = cv2.bitwise_and(analysis_img, analysis_img, mask=color_rescue_mask)
 
     bgr_float = analysis_img.astype(np.float32) / 255.0
     lab_img = cv2.cvtColor(bgr_float, cv2.COLOR_BGR2LAB)
@@ -206,6 +276,8 @@ def analyze_image(original_img, session):
         "analysis_img": analysis_img,
         "visual_masked_img": visual_masked_img,
         "core_masked_img": core_masked_img,
+        "ai_masked_img": ai_masked_img,
+        "color_rescue_img": color_rescue_img,
         "heatmap_masked": heatmap_masked,
         "delta_values": delta_values,
         "mean_bgr": mean_bgr,
@@ -219,19 +291,32 @@ def analyze_image(original_img, session):
         "std_delta_e": std_delta_e,
         "p95_delta_e": p95_delta_e,
         "sample_pixels": int(delta_values.size),
+        "mask_area_ratio": float(np.count_nonzero(display_mask) / display_mask.size),
+        "ai_area_ratio": float(np.count_nonzero(ai_mask) / ai_mask.size),
+        "color_area_ratio": 0.0 if color_rescue_mask is None else float(np.count_nonzero(color_rescue_mask) / color_rescue_mask.size),
     }
 
     del bgr_float, lab_img, lab_pixels, bgr_pixels, delta_map, heatmap_bgr, heatmap_blend
-    del display_mask, analysis_mask, core_pixels
+    del display_mask, analysis_mask, ai_mask, color_rescue_mask, core_pixels
     gc.collect()
     return result
+
+
+# ---------------------------------------------------------------------------
+# Presentation helpers — visual layer only. None of these touch analysis data.
+# ---------------------------------------------------------------------------
+
+STATUS_ICON = {"success": "✓", "warning": "!", "danger": "✕"}
 
 
 def render_kpi(label, value, helper, tone="neutral"):
     st.markdown(
         f"""
         <div class="kpi-card kpi-{tone}">
-            <div class="kpi-label">{label}</div>
+            <div class="kpi-top">
+                <span class="kpi-label">{label}</span>
+                <span class="kpi-dot kpi-dot-{tone}"></span>
+            </div>
             <div class="kpi-value">{value}</div>
             <div class="kpi-helper">{helper}</div>
         </div>
@@ -241,10 +326,14 @@ def render_kpi(label, value, helper, tone="neutral"):
 
 
 def render_status_panel(meta, mean_delta_e, std_delta_e, p95_delta_e):
+    icon = STATUS_ICON.get(meta["tone"], "•")
     st.markdown(
         f"""
         <div class="status-panel status-{meta["tone"]}">
-            <div class="status-eyebrow">Final QA Decision</div>
+            <div class="status-top">
+                <span class="status-eyebrow">Final QA Decision</span>
+                <span class="status-icon">{icon}</span>
+            </div>
             <div class="status-main">{meta["status"]}</div>
             <div class="status-label">{meta["label"]}</div>
             <div class="status-copy">{meta["message"]}</div>
@@ -271,7 +360,7 @@ def render_color_chip(mean_bgr, avg_l, avg_a, avg_b):
             <div class="color-swatch" style="background: rgb({r}, {g}, {b});"></div>
             <div>
                 <div class="color-title">Average Product Color</div>
-                <div class="color-values">L {avg_l:.1f} / a {avg_a:.1f} / b {avg_b:.1f}</div>
+                <div class="color-values">L {avg_l:.1f} &nbsp;/&nbsp; a {avg_a:.1f} &nbsp;/&nbsp; b {avg_b:.1f}</div>
                 <div class="color-helper">정밀 분석 마스크 내부 픽셀 기준</div>
             </div>
         </div>
@@ -292,6 +381,10 @@ def render_panel_title(title, caption):
     )
 
 
+def render_media_label(title):
+    st.markdown(f'<div class="media-label">{title}</div>', unsafe_allow_html=True)
+
+
 def safe_table_columns(df, columns):
     existing = [column for column in columns if column in df.columns]
     return df[existing] if existing else df
@@ -302,211 +395,381 @@ supabase = get_supabase_client()
 st.markdown(
     """
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+
         :root {
-            --bg: #f5f7fb;
-            --panel: #ffffff;
-            --ink: #111827;
-            --muted: #667085;
-            --line: #e5e7eb;
-            --navy: #0f2742;
-            --blue: #2563eb;
-            --amber: #d97706;
-            --green: #15803d;
-            --red: #dc2626;
+            --bg: #f2f3f9;
+            --surface: #ffffff;
+            --surface-soft: #f8f9fd;
+            --border: #e4e7f1;
+            --border-strong: #d8dcec;
+            --ink: #11132a;
+            --ink-secondary: #5b6083;
+            --ink-muted: #9296b0;
+            --navy: #10162e;
+            --navy-soft: #1c2648;
+            --brand: #4338ca;
+            --brand-strong: #352cad;
+            --brand-soft: #edeafc;
+            --success: #0ca34a;
+            --success-strong: #0a7a38;
+            --success-soft: #e6f7ec;
+            --warning: #d97706;
+            --warning-strong: #b45309;
+            --warning-soft: #fef3e2;
+            --danger: #dc2626;
+            --danger-strong: #b91c1c;
+            --danger-soft: #fde9e9;
+            --radius-lg: 18px;
+            --radius-md: 14px;
+            --radius-sm: 10px;
+            --shadow-sm: 0 1px 2px rgba(17, 19, 42, 0.04);
+            --shadow-md: 0 10px 26px rgba(17, 19, 42, 0.07);
+            --shadow-lg: 0 22px 48px rgba(17, 19, 42, 0.10);
+        }
+
+        html, body, [class*="css"] {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
 
         .stApp {
-            background: var(--bg);
+            background:
+                radial-gradient(1100px 420px at 8% -8%, rgba(67, 56, 202, 0.07), transparent 60%),
+                var(--bg);
             color: var(--ink);
         }
 
         .block-container {
-            max-width: 1360px;
-            padding-top: 1.4rem;
-            padding-bottom: 3rem;
+            max-width: 1380px;
+            padding-top: 1.6rem;
+            padding-bottom: 3.5rem;
         }
 
         #MainMenu, footer, header {
             visibility: hidden;
         }
 
+        h1, h2, h3, h4, h5, strong {
+            color: var(--ink);
+        }
+
+        /* ---------- Header ---------- */
+
         .report-header {
+            position: relative;
             display: flex;
             justify-content: space-between;
             align-items: flex-start;
-            gap: 24px;
-            padding: 24px 26px;
-            margin-bottom: 18px;
-            background: #ffffff;
-            border: 1px solid var(--line);
-            border-radius: 10px;
-            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
+            gap: 28px;
+            padding: 30px 32px 26px;
+            margin-bottom: 22px;
+            background: linear-gradient(180deg, #ffffff 0%, #fbfbfe 100%);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-lg);
+            overflow: hidden;
+        }
+
+        .report-header::before {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, var(--brand) 0%, #7c6ff0 45%, #22c1a1 100%);
         }
 
         .brand-mark {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
             font-size: 12px;
             font-weight: 800;
-            color: var(--blue);
+            color: var(--brand);
             text-transform: uppercase;
-            letter-spacing: .08em;
-            margin-bottom: 8px;
+            letter-spacing: .09em;
+            margin-bottom: 10px;
+        }
+
+        .brand-mark::before {
+            content: "";
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--brand);
+            box-shadow: 0 0 0 4px var(--brand-soft);
         }
 
         .report-title {
             font-size: 30px;
-            line-height: 1.15;
-            font-weight: 850;
+            line-height: 1.2;
+            font-weight: 800;
             color: var(--navy);
-            margin-bottom: 8px;
+            letter-spacing: -0.01em;
+            margin-bottom: 10px;
         }
 
         .report-subtitle {
             font-size: 14px;
-            color: var(--muted);
-            max-width: 820px;
+            line-height: 1.6;
+            color: var(--ink-secondary);
+            max-width: 760px;
         }
 
-        .model-strip {
-            min-width: 300px;
-            padding: 14px 16px;
-            border: 1px solid #dbe4f0;
-            border-radius: 8px;
-            background: #f8fafc;
+        .spec-chips {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            min-width: 280px;
+            padding: 16px 18px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            background: var(--surface-soft);
         }
 
-        .model-strip div:first-child {
-            font-size: 12px;
+        .spec-chips-title {
+            font-size: 11px;
             font-weight: 800;
-            color: var(--navy);
-            margin-bottom: 8px;
+            color: var(--ink-muted);
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            margin-bottom: 2px;
         }
 
-        .model-strip span {
-            display: block;
-            font-size: 12px;
-            color: var(--muted);
-            line-height: 1.7;
+        .spec-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12.5px;
+            padding: 5px 0;
+            border-top: 1px dashed var(--border);
         }
+
+        .spec-row:first-of-type { border-top: none; }
+
+        .spec-row span:first-child {
+            color: var(--ink-secondary);
+        }
+
+        .spec-row span:last-child {
+            font-weight: 700;
+            color: var(--navy);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .spec-pill {
+            display: inline-block;
+            padding: 2px 9px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 800;
+        }
+
+        .spec-pill-on { background: var(--success-soft); color: var(--success-strong); }
+        .spec-pill-off { background: var(--surface); color: var(--ink-muted); border: 1px solid var(--border-strong); }
+
+        /* ---------- Upload zone ---------- */
 
         .upload-note {
-            background: #ffffff;
-            border: 1px dashed #b6c2d2;
-            border-radius: 10px;
-            padding: 22px;
-            margin: 8px 0 16px;
+            position: relative;
+            background: var(--surface);
+            border: 1.5px dashed var(--border-strong);
+            border-radius: var(--radius-md);
+            padding: 24px 22px;
+            margin: 4px 0 18px;
+            transition: border-color .15s ease;
         }
 
         .upload-note strong {
             display: block;
             color: var(--navy);
             font-size: 17px;
+            font-weight: 800;
             margin-bottom: 6px;
         }
 
         .upload-note span {
-            color: var(--muted);
+            color: var(--ink-secondary);
             font-size: 13px;
+            line-height: 1.55;
         }
 
+        /* ---------- Section titles / cards ---------- */
+
         .panel-title {
-            margin: 8px 0 12px;
+            margin: 10px 0 14px;
         }
 
         .panel-heading {
             font-size: 15px;
-            font-weight: 850;
+            font-weight: 800;
             color: var(--navy);
+            letter-spacing: -0.01em;
         }
 
         .panel-caption {
-            font-size: 12px;
-            color: var(--muted);
-            margin-top: 2px;
+            font-size: 12.5px;
+            color: var(--ink-muted);
+            margin-top: 3px;
         }
 
         .section-card {
-            background: var(--panel);
-            border: 1px solid var(--line);
-            border-radius: 10px;
-            padding: 18px;
-            box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 22px;
+            box-shadow: var(--shadow-md);
         }
+
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 10px;
+            min-height: 260px;
+            justify-content: center;
+        }
+
+        .empty-state-badge {
+            width: 46px;
+            height: 46px;
+            border-radius: 13px;
+            background: var(--brand-soft);
+            color: var(--brand);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            font-weight: 800;
+            margin-bottom: 6px;
+        }
+
+        /* ---------- KPI cards ---------- */
 
         .kpi-card {
-            min-height: 118px;
-            background: #ffffff;
-            border: 1px solid var(--line);
-            border-top: 4px solid #94a3b8;
-            border-radius: 10px;
-            padding: 16px;
-            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+            min-height: 122px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--border-strong);
+            border-radius: var(--radius-md);
+            padding: 17px 18px;
+            box-shadow: var(--shadow-sm);
+            transition: box-shadow .15s ease, transform .15s ease;
         }
 
-        .kpi-success { border-top-color: var(--green); }
-        .kpi-warning { border-top-color: var(--amber); }
-        .kpi-danger { border-top-color: var(--red); }
-        .kpi-blue { border-top-color: var(--blue); }
+        .kpi-card:hover {
+            box-shadow: var(--shadow-md);
+            transform: translateY(-1px);
+        }
+
+        .kpi-success { border-left-color: var(--success); }
+        .kpi-warning { border-left-color: var(--warning); }
+        .kpi-danger  { border-left-color: var(--danger); }
+        .kpi-blue    { border-left-color: var(--brand); }
+
+        .kpi-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
 
         .kpi-label {
-            font-size: 12px;
-            color: var(--muted);
-            font-weight: 750;
+            font-size: 11.5px;
+            color: var(--ink-muted);
+            font-weight: 800;
             text-transform: uppercase;
-            letter-spacing: .04em;
+            letter-spacing: .05em;
         }
 
+        .kpi-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--border-strong);
+        }
+
+        .kpi-dot-success { background: var(--success); }
+        .kpi-dot-warning { background: var(--warning); }
+        .kpi-dot-danger  { background: var(--danger); }
+        .kpi-dot-blue    { background: var(--brand); }
+
         .kpi-value {
-            font-size: 28px;
+            font-size: 27px;
             line-height: 1.2;
-            font-weight: 850;
+            font-weight: 800;
             color: var(--ink);
-            margin-top: 8px;
+            margin-top: 10px;
+            letter-spacing: -0.01em;
         }
 
         .kpi-helper {
             font-size: 12px;
-            color: var(--muted);
+            color: var(--ink-muted);
             margin-top: 8px;
         }
 
+        /* ---------- Status panel ---------- */
+
         .status-panel {
+            position: relative;
             min-height: 330px;
-            border-radius: 10px;
-            padding: 22px;
+            border-radius: var(--radius-lg);
+            padding: 24px 24px 22px;
             color: #ffffff;
-            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
+            box-shadow: var(--shadow-lg);
+            overflow: hidden;
         }
 
-        .status-success { background: #14532d; }
-        .status-warning { background: #92400e; }
-        .status-danger { background: #991b1b; }
+        .status-success { background: linear-gradient(155deg, #0b7a3d 0%, #0a5c30 100%); }
+        .status-warning { background: linear-gradient(155deg, #b45309 0%, #8a3e07 100%); }
+        .status-danger  { background: linear-gradient(155deg, #c62828 0%, #931f1f 100%); }
+
+        .status-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
 
         .status-eyebrow {
             font-size: 11px;
-            font-weight: 850;
+            font-weight: 800;
             text-transform: uppercase;
-            letter-spacing: .08em;
-            opacity: .78;
+            letter-spacing: .09em;
+            opacity: .8;
+        }
+
+        .status-icon {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, .16);
+            border: 1px solid rgba(255, 255, 255, .28);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 15px;
+            font-weight: 800;
         }
 
         .status-main {
-            font-size: 54px;
+            font-size: 52px;
             line-height: 1;
             font-weight: 900;
-            margin-top: 18px;
+            margin-top: 20px;
+            letter-spacing: -0.02em;
         }
 
         .status-label {
-            font-size: 18px;
-            font-weight: 800;
+            font-size: 17px;
+            font-weight: 700;
             margin-top: 8px;
+            opacity: .96;
         }
 
         .status-copy {
             font-size: 13px;
-            line-height: 1.55;
-            opacity: .9;
-            margin-top: 12px;
+            line-height: 1.6;
+            opacity: .88;
+            margin-top: 14px;
         }
 
         .status-grid {
@@ -517,107 +780,187 @@ st.markdown(
         }
 
         .status-grid div {
-            padding: 10px;
-            background: rgba(255, 255, 255, .13);
-            border: 1px solid rgba(255, 255, 255, .18);
-            border-radius: 8px;
+            padding: 11px 12px;
+            background: rgba(255, 255, 255, .12);
+            border: 1px solid rgba(255, 255, 255, .16);
+            border-radius: 10px;
         }
 
         .status-grid span {
             display: block;
             font-size: 11px;
-            opacity: .75;
+            opacity: .8;
         }
 
         .status-grid strong {
             display: block;
-            font-size: 20px;
+            font-size: 19px;
             margin-top: 4px;
+            color: #ffffff;
+            font-variant-numeric: tabular-nums;
         }
+
+        /* ---------- Color chip ---------- */
 
         .color-chip-card {
             display: grid;
-            grid-template-columns: 106px 1fr;
-            gap: 14px;
+            grid-template-columns: 104px 1fr;
+            gap: 16px;
             align-items: center;
-            background: #ffffff;
-            border: 1px solid var(--line);
-            border-radius: 10px;
-            padding: 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 16px;
             min-height: 136px;
+            box-shadow: var(--shadow-sm);
         }
 
         .color-swatch {
-            width: 106px;
-            height: 106px;
-            border-radius: 8px;
-            border: 1px solid rgba(15, 23, 42, .14);
-            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .25);
+            width: 104px;
+            height: 104px;
+            border-radius: 12px;
+            border: 1px solid rgba(17, 19, 42, .10);
+            box-shadow: inset 0 0 0 3px rgba(255, 255, 255, .6), var(--shadow-sm);
         }
 
         .color-title {
-            font-size: 13px;
-            color: var(--muted);
+            font-size: 12.5px;
+            color: var(--ink-muted);
             font-weight: 800;
             text-transform: uppercase;
-            letter-spacing: .04em;
+            letter-spacing: .05em;
         }
 
         .color-values {
-            font-size: 21px;
-            font-weight: 850;
+            font-size: 20px;
+            font-weight: 800;
             color: var(--ink);
             margin-top: 8px;
+            font-variant-numeric: tabular-nums;
         }
 
         .color-helper {
             font-size: 12px;
-            color: var(--muted);
-            margin-top: 6px;
+            color: var(--ink-muted);
+            margin-top: 7px;
+        }
+
+        /* ---------- Media gallery ---------- */
+
+        .media-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 12.5px;
+            font-weight: 800;
+            color: var(--navy);
+            margin: 2px 0 8px;
+        }
+
+        .media-label::before {
+            content: "";
+            width: 6px;
+            height: 6px;
+            border-radius: 2px;
+            background: var(--brand);
         }
 
         [data-testid="stImage"] {
-            border-radius: 10px;
+            border-radius: var(--radius-md);
             overflow: hidden;
-            border: 1px solid var(--line);
-            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-sm);
         }
+
+        [data-testid="stImage"] img {
+            display: block;
+        }
+
+        /* ---------- Tabs ---------- */
 
         .stTabs [data-baseweb="tab-list"] {
             gap: 8px;
-            margin-bottom: 10px;
+            margin-bottom: 14px;
+            border-bottom: none;
         }
 
         .stTabs [data-baseweb="tab"] {
             height: 44px;
-            padding: 0 18px;
-            border-radius: 8px;
-            background: #ffffff;
-            border: 1px solid var(--line);
-            color: var(--muted);
-            font-weight: 750;
+            padding: 0 20px;
+            border-radius: 999px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--ink-secondary);
+            font-weight: 700;
+            transition: all .15s ease;
+        }
+
+        .stTabs [data-baseweb="tab"]:hover {
+            border-color: var(--border-strong);
+            color: var(--ink);
         }
 
         .stTabs [aria-selected="true"] {
             color: #ffffff !important;
-            background: var(--navy);
-            border-color: var(--navy);
+            background: var(--navy) !important;
+            border-color: var(--navy) !important;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .stTabs [data-baseweb="tab-highlight"],
+        .stTabs [data-baseweb="tab-border"] {
+            display: none;
+        }
+
+        /* ---------- Inputs & buttons ---------- */
+
+        .stTextInput input, .stTextInput > div > div {
+            border-radius: var(--radius-sm) !important;
         }
 
         .stButton > button {
             width: 100%;
             min-height: 44px;
-            border-radius: 8px;
+            border-radius: var(--radius-sm);
             border: 1px solid var(--navy);
             background: var(--navy);
             color: #ffffff;
             font-weight: 800;
+            letter-spacing: .01em;
+            transition: all .15s ease;
         }
 
         .stButton > button:hover {
-            border-color: #1d4ed8;
-            background: #1d4ed8;
+            border-color: var(--brand);
+            background: var(--brand);
             color: #ffffff;
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-md);
+        }
+
+        .stButton > button:active {
+            transform: translateY(0);
+        }
+
+        [data-testid="stExpander"] {
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            background: var(--surface);
+            box-shadow: var(--shadow-sm);
+        }
+
+        [data-testid="stDataFrame"] {
+            border-radius: var(--radius-md);
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }
+
+        .stAlert {
+            border-radius: var(--radius-sm);
+        }
+
+        hr {
+            border-color: var(--border);
         }
     </style>
     """,
@@ -626,7 +969,11 @@ st.markdown(
 
 
 target_lab = get_target_lab()
-target_text = "image mean" if target_lab is None else f"L {target_lab[0]:.1f} / a {target_lab[1]:.1f} / b {target_lab[2]:.1f}"
+target_text = "이미지 평균" if target_lab is None else f"L {target_lab[0]:.1f} / a {target_lab[1]:.1f} / b {target_lab[2]:.1f}"
+color_rescue_pill = (
+    '<span class="spec-pill spec-pill-on">ON</span>' if USE_COLOR_RESCUE_MASK
+    else '<span class="spec-pill spec-pill-off">OFF</span>'
+)
 
 st.markdown(
     f"""
@@ -635,16 +982,17 @@ st.markdown(
             <div class="brand-mark">Snack Vision QC</div>
             <div class="report-title">고정밀 완제품 색차 분석 리포트</div>
             <div class="report-subtitle">
-                고해상도 AI 마스킹과 float Lab 색공간 계산으로 평균색, Delta E 분포, P95 편차를 산출합니다.
-                마스크 경계 픽셀은 분석에서 제외해 배경 혼입을 줄였습니다.
+                AI 마스킹과 스낵 색상 기반 보조 마스크를 결합해 제품 영역 누락을 줄이고,
+                float Lab 색공간 기준으로 Delta E 분포와 P95 편차를 산출합니다.
             </div>
         </div>
-        <div class="model-strip">
-            <div>Precision Profile</div>
-            <span>Mask resolution: {MASK_DIM}px</span>
-            <span>Color analysis: {ANALYSIS_DIM}px</span>
-            <span>Segmentation model: {REMBG_MODEL}</span>
-            <span>Reference: {target_text}</span>
+        <div class="spec-chips">
+            <div class="spec-chips-title">Precision Profile</div>
+            <div class="spec-row"><span>Mask resolution</span><span>{MASK_DIM}px</span></div>
+            <div class="spec-row"><span>Color analysis</span><span>{ANALYSIS_DIM}px</span></div>
+            <div class="spec-row"><span>Segmentation model</span><span>{REMBG_MODEL}</span></div>
+            <div class="spec-row"><span>Color rescue mask</span>{color_rescue_pill}</div>
+            <div class="spec-row"><span>Reference</span><span>{target_text}</span></div>
         </div>
     </div>
     """,
@@ -685,7 +1033,7 @@ with tab1:
             render_kpi("NG", f">= {NG_THRESHOLD:.1f}", "관리 한계 기준", "danger")
 
         st.caption(
-            "기준색 비교가 필요하면 TARGET_L, TARGET_A, TARGET_B 값을 Railway Variables에 입력하세요."
+            "isnet이 제품을 일부만 잡으면 REMBG_MODEL=u2net, MASK_THRESHOLD=24, MASK_ERODE_ITER=0 조합을 권장합니다."
         )
 
     with right_col:
@@ -693,9 +1041,12 @@ with tab1:
             st.markdown(
                 """
                 <div class="section-card">
-                    <div class="panel-heading">분석 결과 대기</div>
-                    <div class="panel-caption" style="margin-top: 8px;">
-                        이미지를 업로드하면 고정밀 마스킹, Delta E 분포, 평균 Lab, 판정 결과가 표시됩니다.
+                    <div class="empty-state">
+                        <div class="empty-state-badge">QC</div>
+                        <div class="panel-heading">분석 결과 대기</div>
+                        <div class="panel-caption">
+                            이미지를 업로드하면 고정밀 마스킹, Delta E 분포, 평균 Lab, 판정 결과가 표시됩니다.
+                        </div>
                     </div>
                 </div>
                 """,
@@ -710,13 +1061,15 @@ with tab1:
                     st.error("이미지를 읽지 못했습니다. JPG 또는 PNG 파일을 다시 업로드해주세요.")
                     st.stop()
 
-                with st.spinner("고정밀 AI 마스킹과 색차 분석을 실행 중입니다..."):
+                with st.spinner("AI 마스킹과 색상 보조 마스크를 결합해 분석 중입니다..."):
                     ai_session = load_ai_model(REMBG_MODEL)
                     result = analyze_image(original_img, ai_session)
 
                 analysis_img = result["analysis_img"]
                 visual_masked_img = result["visual_masked_img"]
                 core_masked_img = result["core_masked_img"]
+                ai_masked_img = result["ai_masked_img"]
+                color_rescue_img = result["color_rescue_img"]
                 heatmap_masked = result["heatmap_masked"]
                 delta_values = result["delta_values"]
                 mean_bgr = result["mean_bgr"]
@@ -727,6 +1080,9 @@ with tab1:
                 std_delta_e = result["std_delta_e"]
                 p95_delta_e = result["p95_delta_e"]
                 sample_pixels = result["sample_pixels"]
+                mask_area_ratio = result["mask_area_ratio"]
+                ai_area_ratio = result["ai_area_ratio"]
+                color_area_ratio = result["color_area_ratio"]
                 analysis_mode = result["analysis_mode"]
                 status_meta = calculate_status(mean_delta_e)
 
@@ -738,7 +1094,7 @@ with tab1:
                 with kpi_cols[2]:
                     render_kpi("P95 Delta E", f"{p95_delta_e:.2f}", "상위 5% 편차 경계", "neutral")
                 with kpi_cols[3]:
-                    render_kpi("Sample Pixels", f"{sample_pixels:,}", "정밀 마스크 내부 픽셀", "blue")
+                    render_kpi("Mask Coverage", f"{mask_area_ratio * 100:.1f}%", f"AI {ai_area_ratio * 100:.1f}% / Color {color_area_ratio * 100:.1f}%", "blue")
 
                 st.write("")
                 status_col, color_col = st.columns([1, 1], gap="large")
@@ -748,37 +1104,49 @@ with tab1:
                     render_color_chip(mean_bgr, avg_l, avg_a, avg_b)
 
                     fig, ax = plt.subplots(figsize=(4.8, 3.2))
-                    ax.hist(delta_values, bins=80, color="#0f2742", edgecolor="white", linewidth=0.35)
+                    ax.hist(delta_values, bins=80, color="#4338ca", edgecolor="#ffffff", linewidth=0.35, alpha=0.92)
                     ax.axvline(mean_delta_e, color="#d97706", linewidth=2, label="Mean")
                     ax.axvline(p95_delta_e, color="#dc2626", linewidth=2, label="P95")
-                    ax.set_xlabel("Delta E", fontsize=9)
-                    ax.set_ylabel("Pixel Count", fontsize=9)
-                    ax.grid(axis="y", linestyle="--", alpha=0.24)
-                    ax.legend(frameon=False, fontsize=8)
+                    ax.set_xlabel("Delta E", fontsize=9, color="#5b6083")
+                    ax.set_ylabel("Pixel Count", fontsize=9, color="#5b6083")
+                    ax.tick_params(colors="#9296b0", labelsize=8)
+                    ax.grid(axis="y", linestyle="--", alpha=0.25, color="#d8dcec")
+                    ax.legend(frameon=False, fontsize=8, labelcolor="#11132a")
                     ax.spines["top"].set_visible(False)
                     ax.spines["right"].set_visible(False)
+                    ax.spines["left"].set_color("#d8dcec")
+                    ax.spines["bottom"].set_color("#d8dcec")
                     fig.patch.set_facecolor("#ffffff")
                     ax.set_facecolor("#ffffff")
                     plt.tight_layout()
                     st.pyplot(fig)
                     plt.close(fig)
 
-                render_panel_title("시각 검증", "원본, 전체 마스크, 분석 코어 마스크, 실제 Delta E 히트맵을 비교합니다.")
+                render_panel_title("시각 검증", "AI 마스크와 색상 보조 마스크가 합쳐진 최종 제품 영역을 확인합니다.")
                 img_col1, img_col2 = st.columns(2, gap="medium")
                 with img_col1:
-                    st.markdown("**Raw Image**")
+                    render_media_label("Raw Image")
                     st.image(cv2.cvtColor(analysis_img, cv2.COLOR_BGR2RGB), use_container_width=True)
                 with img_col2:
-                    st.markdown("**Full AI Mask**")
+                    render_media_label("Final Product Mask")
                     st.image(cv2.cvtColor(visual_masked_img, cv2.COLOR_BGR2RGB), use_container_width=True)
 
                 img_col3, img_col4 = st.columns(2, gap="medium")
                 with img_col3:
-                    st.markdown("**Analysis Core Mask**")
+                    render_media_label("Analysis Core Mask")
                     st.image(cv2.cvtColor(core_masked_img, cv2.COLOR_BGR2RGB), use_container_width=True)
                 with img_col4:
-                    st.markdown("**Delta E Heatmap**")
+                    render_media_label("Delta E Heatmap")
                     st.image(cv2.cvtColor(heatmap_masked, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+                with st.expander("마스크 진단 보기"):
+                    diag_col1, diag_col2 = st.columns(2, gap="medium")
+                    with diag_col1:
+                        render_media_label("AI Mask Only")
+                        st.image(cv2.cvtColor(ai_masked_img, cv2.COLOR_BGR2RGB), use_container_width=True)
+                    with diag_col2:
+                        render_media_label("Color Rescue Mask Only")
+                        st.image(cv2.cvtColor(color_rescue_img, cv2.COLOR_BGR2RGB), use_container_width=True)
 
                 st.write("")
                 save_col, note_col = st.columns([0.35, 0.65])
@@ -808,7 +1176,7 @@ with tab1:
                             st.error(f"저장 실패: {e}")
 
                 del original_img, analysis_img, visual_masked_img, core_masked_img
-                del heatmap_masked, delta_values, result
+                del ai_masked_img, color_rescue_img, heatmap_masked, delta_values, result
                 gc.collect()
 
             except Exception as e:
@@ -861,7 +1229,7 @@ with tab2:
                 st.write("")
                 if "lot_number" in df.columns and "delta_e" in df.columns:
                     chart_df = df[["lot_number", "delta_e"]].set_index("lot_number")
-                    st.line_chart(chart_df, color="#0f2742")
+                    st.line_chart(chart_df, color="#4338ca")
 
                 st.write("")
                 st.dataframe(
