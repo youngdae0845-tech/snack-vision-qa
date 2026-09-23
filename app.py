@@ -6,15 +6,14 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 from rembg import new_session, remove
-from supabase import create_client, Client
+from supabase import create_client
 
 
-# ==========================================
-# 1. 기본 설정
-# ==========================================
 st.set_page_config(page_title="스낵 완제품 색차분석기", layout="wide")
 
-MAX_IMAGE_DIM = int(os.environ.get("MAX_IMAGE_DIM", "900"))
+# Railway Variables에서 조절 가능
+MASK_DIM = int(os.environ.get("MASK_DIM", "900"))          # AI 누끼용 해상도
+ANALYSIS_DIM = int(os.environ.get("ANALYSIS_DIM", "1600")) # 색차 분석용 해상도
 REMBG_MODEL = os.environ.get("REMBG_MODEL", "u2net")
 
 
@@ -41,9 +40,8 @@ def load_ai_model():
     return new_session(REMBG_MODEL)
 
 
-def optimize_image_resolution(img, max_dim=900):
+def resize_by_max_dim(img, max_dim):
     h, w = img.shape[:2]
-
     if max(h, w) <= max_dim:
         return img
 
@@ -54,13 +52,95 @@ def optimize_image_resolution(img, max_dim=900):
     return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
-supabase: Client | None = get_supabase_client()
-ai_session = load_ai_model()
+def create_large_mask(original_img, analysis_img, session):
+    mask_input_img = resize_by_max_dim(original_img, MASK_DIM)
+
+    no_bg_img = remove(mask_input_img, session=session)
+
+    if no_bg_img.ndim < 3 or no_bg_img.shape[2] < 4:
+        raise ValueError("배경 제거 결과에 alpha 채널이 없습니다.")
+
+    small_alpha = no_bg_img[:, :, 3]
+
+    large_mask = cv2.resize(
+        small_alpha,
+        (analysis_img.shape[1], analysis_img.shape[0]),
+        interpolation=cv2.INTER_LINEAR
+    )
+
+    _, large_mask = cv2.threshold(large_mask, 127, 255, cv2.THRESH_BINARY)
+
+    # 가장자리 배경 픽셀이 색차 분석에 섞이는 것을 줄임
+    kernel = np.ones((3, 3), np.uint8)
+    large_mask = cv2.erode(large_mask, kernel, iterations=1)
+
+    return large_mask
 
 
-# ==========================================
-# 2. CSS
-# ==========================================
+def analyze_image(original_img, session):
+    analysis_img = resize_by_max_dim(original_img, ANALYSIS_DIM)
+    mask = create_large_mask(original_img, analysis_img, session)
+
+    if np.count_nonzero(mask) == 0:
+        raise ValueError("스낵 영역을 감지하지 못했습니다.")
+
+    black_bg_img = cv2.bitwise_and(analysis_img, analysis_img, mask=mask)
+
+    lab_img = cv2.cvtColor(analysis_img, cv2.COLOR_BGR2LAB)
+    mean_lab = cv2.mean(lab_img, mask=mask)
+    mean_bgr = cv2.mean(analysis_img, mask=mask)
+
+    avg_l = mean_lab[0] * (100 / 255)
+    avg_a = mean_lab[1] - 128
+    avg_b = mean_lab[2] - 128
+
+    lab_float = lab_img.astype(np.float32)
+
+    delta_e_map = np.sqrt(
+        ((lab_float[:, :, 0] - mean_lab[0]) * (100 / 255)) ** 2 +
+        (lab_float[:, :, 1] - mean_lab[1]) ** 2 +
+        (lab_float[:, :, 2] - mean_lab[2]) ** 2
+    )
+
+    valid_pixels = delta_e_map[mask > 0]
+
+    mean_delta_e = float(np.mean(valid_pixels)) if len(valid_pixels) > 0 else 0
+    std_delta_e = float(np.std(valid_pixels)) if len(valid_pixels) > 0 else 0
+
+    a_channel = lab_float[:, :, 1] - 128
+    min_redness, max_redness = 10.0, 28.0
+
+    ratio = np.clip((a_channel - min_redness) / (max_redness - min_redness), 0, 1)
+    hue = np.uint8(60 - (ratio * 60))
+    sat = np.full_like(hue, 255)
+    val = np.full_like(hue, 255)
+
+    custom_bgr = cv2.cvtColor(cv2.merge([hue, sat, val]), cv2.COLOR_HSV2BGR)
+    blended_heatmap = cv2.addWeighted(black_bg_img, 0.6, custom_bgr, 0.4, 0)
+    heatmap_masked = cv2.bitwise_and(blended_heatmap, blended_heatmap, mask=mask)
+
+    result = {
+        "analysis_img": analysis_img,
+        "black_bg_img": black_bg_img,
+        "heatmap_masked": heatmap_masked,
+        "valid_pixels": valid_pixels,
+        "mean_bgr": mean_bgr,
+        "avg_l": avg_l,
+        "avg_a": avg_a,
+        "avg_b": avg_b,
+        "mean_delta_e": mean_delta_e,
+        "std_delta_e": std_delta_e,
+    }
+
+    del lab_img, lab_float, delta_e_map, custom_bgr, blended_heatmap, mask
+    gc.collect()
+
+    return result
+
+
+supabase = get_supabase_client()
+
+
 st.markdown("""
 <style>
     .stApp {
@@ -70,42 +150,22 @@ st.markdown("""
         color: #112A46;
         font-weight: 800;
         text-align: center;
-        padding-bottom: 20px;
+        padding-bottom: 18px;
         border-bottom: 3px solid #112A46;
-        margin-bottom: 30px;
-    }
-    h3 {
-        color: #112A46;
-        font-weight: 700;
+        margin-bottom: 28px;
     }
     div[data-testid="metric-container"] {
         background-color: white;
         border: 1px solid #E2E8F0;
-        padding: 20px 20px;
-        border-radius: 12px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+        padding: 18px;
+        border-radius: 10px;
+        box-shadow: 0 4px 8px rgba(15, 23, 42, 0.06);
         border-left: 5px solid #112A46;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-        margin-bottom: 20px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        background-color: white;
-        border-radius: 8px 8px 0 0;
-        padding: 10px 25px;
-        border: 1px solid #E2E8F0;
-        border-bottom: none;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #112A46;
-        color: white !important;
-        font-weight: bold;
     }
     [data-testid="stImage"] {
         border-radius: 8px;
         overflow: hidden;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        box-shadow: 0 4px 8px rgba(15, 23, 42, 0.08);
     }
 </style>
 """, unsafe_allow_html=True)
@@ -113,14 +173,12 @@ st.markdown("""
 
 st.title("🏭 스낵 완제품 색차분석기")
 
-tab1, tab2 = st.tabs(["📸 스낵 색차 분석실", "📈 누적 품질 통계 (LOT)"])
+tab1, tab2 = st.tabs(["📸 스낵 색차 분석실", "📈 누적 품질 통계"])
 
 
-# ==========================================
-# [탭 1] 실시간 검사 화면
-# ==========================================
 with tab1:
     st.markdown("##### 📌 스낵 완제품 색차분석기")
+
     uploaded_file = st.file_uploader(
         "스낵 사진을 업로드하거나 촬영하세요",
         type=["jpg", "jpeg", "png"]
@@ -135,71 +193,39 @@ with tab1:
                 st.error("이미지를 읽지 못했습니다. JPG 또는 PNG 파일을 다시 업로드해주세요.")
                 st.stop()
 
-            original_img = optimize_image_resolution(original_img, max_dim=MAX_IMAGE_DIM)
+            with st.spinner("AI가 스낵 영역과 색차(ΔE)를 분석 중입니다..."):
+                ai_session = load_ai_model()
+                result = analyze_image(original_img, ai_session)
 
-            with st.spinner("AI가 시즈닝 분포와 색차(ΔE)를 정밀 분석 중입니다..."):
-                no_bg_img = remove(original_img, session=ai_session)
+            analysis_img = result["analysis_img"]
+            black_bg_img = result["black_bg_img"]
+            heatmap_masked = result["heatmap_masked"]
+            valid_pixels = result["valid_pixels"]
+            mean_bgr = result["mean_bgr"]
+            avg_l = result["avg_l"]
+            avg_a = result["avg_a"]
+            avg_b = result["avg_b"]
+            mean_delta_e = result["mean_delta_e"]
+            std_delta_e = result["std_delta_e"]
 
-                if no_bg_img.ndim < 3 or no_bg_img.shape[2] < 4:
-                    st.error("배경 제거 결과에 alpha 채널이 없습니다. 다른 이미지로 다시 시도해주세요.")
-                    st.stop()
-
-                alpha_channel = no_bg_img[:, :, 3]
-                _, mask = cv2.threshold(alpha_channel, 10, 255, cv2.THRESH_BINARY)
-
-                if np.count_nonzero(mask) == 0:
-                    st.error("스낵 영역을 감지하지 못했습니다. 배경이 더 단순한 사진으로 다시 시도해주세요.")
-                    st.stop()
-
-                black_bg_img = cv2.bitwise_and(original_img, original_img, mask=mask)
-
-                lab_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2LAB)
-                mean_lab = cv2.mean(lab_img, mask=mask)
-                mean_bgr = cv2.mean(original_img, mask=mask)
-
-                avg_l = mean_lab[0] * (100 / 255)
-                avg_a = mean_lab[1] - 128
-                avg_b = mean_lab[2] - 128
-
-                lab_float = lab_img.astype(np.float32)
-                delta_e_map = np.sqrt(
-                    ((lab_float[:, :, 0] - mean_lab[0]) * (100 / 255)) ** 2 +
-                    (lab_float[:, :, 1] - mean_lab[1]) ** 2 +
-                    (lab_float[:, :, 2] - mean_lab[2]) ** 2
-                )
-
-                valid_pixels = delta_e_map[mask > 0]
-                mean_delta_e = float(np.mean(valid_pixels)) if len(valid_pixels) > 0 else 0
-                std_delta_e = float(np.std(valid_pixels)) if len(valid_pixels) > 0 else 0
-
-                a_channel = lab_float[:, :, 1] - 128
-                min_redness, max_redness = 10.0, 28.0
-
-                ratio = np.clip((a_channel - min_redness) / (max_redness - min_redness), 0, 1)
-                hue = np.uint8(60 - (ratio * 60))
-                sat = np.full_like(hue, 255)
-                val = np.full_like(hue, 255)
-
-                custom_bgr = cv2.cvtColor(cv2.merge([hue, sat, val]), cv2.COLOR_HSV2BGR)
-                blended_heatmap = cv2.addWeighted(black_bg_img, 0.6, custom_bgr, 0.4, 0)
-                heatmap_masked = cv2.bitwise_and(blended_heatmap, blended_heatmap, mask=mask)
-
-                del no_bg_img, alpha_channel, lab_img, lab_float, delta_e_map
-                del custom_bgr, blended_heatmap
-                gc.collect()
+            st.caption(
+                f"누끼 해상도: {MASK_DIM}px / 색차 분석 해상도: {ANALYSIS_DIM}px / 모델: {REMBG_MODEL}"
+            )
 
             st.markdown("<br>", unsafe_allow_html=True)
+
             img_col1, img_col2 = st.columns(2)
 
             with img_col1:
                 st.markdown("**RAW IMAGE**")
-                st.image(cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB), use_container_width=True)
+                st.image(cv2.cvtColor(analysis_img, cv2.COLOR_BGR2RGB), use_container_width=True)
 
             with img_col2:
-                st.markdown("**AI MASKING (Conveyor Excluded)**")
+                st.markdown("**AI MASKING**")
                 st.image(cv2.cvtColor(black_bg_img, cv2.COLOR_BGR2RGB), use_container_width=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
+
             col_tile, col_dist, col_map, col_metrics = st.columns([1.2, 2, 1.5, 1])
 
             with col_tile:
@@ -231,16 +257,18 @@ with tab1:
                 plt.close(fig)
 
             with col_map:
-                st.markdown("**HEATMAP (Seasoning/Burn)**")
+                st.markdown("**HEATMAP**")
                 st.image(cv2.cvtColor(heatmap_masked, cv2.COLOR_BGR2RGB), use_container_width=True)
 
             with col_metrics:
                 st.markdown("**QA METRICS**")
+
                 dev_level = (
                     "Very High (NG)"
                     if mean_delta_e >= 20
                     else ("High (Review)" if mean_delta_e >= 10 else "Normal (OK)")
                 )
+
                 status_color = "#E53E3E" if mean_delta_e >= 20 else "#38A169"
 
                 st.markdown(f"""
@@ -254,6 +282,7 @@ with tab1:
                 """, unsafe_allow_html=True)
 
             st.markdown("---")
+
             lot_input = st.text_input("LOT NUMBER", "LOT-2026-005")
 
             status = "NG" if mean_delta_e >= 20 else "OK"
@@ -276,11 +305,11 @@ with tab1:
 
                     try:
                         supabase.table("snack_color_logs").insert(log_data).execute()
-                        st.success("✅ [Data Sync Complete] 수파베이스에 기록이 완료되었습니다.")
+                        st.success("✅ 수파베이스에 기록이 완료되었습니다.")
                     except Exception as e:
                         st.error(f"저장 실패: {e}")
 
-            del original_img, black_bg_img, heatmap_masked, mask, valid_pixels
+            del original_img, analysis_img, black_bg_img, heatmap_masked, valid_pixels, result
             gc.collect()
 
         except Exception as e:
@@ -288,9 +317,6 @@ with tab1:
             st.exception(e)
 
 
-# ==========================================
-# [탭 2] 통계 대시보드 화면
-# ==========================================
 with tab2:
     st.markdown("##### 📊 실시간 누적 품질 통계")
 
@@ -341,7 +367,6 @@ with tab2:
                     ]],
                     use_container_width=True
                 )
-
             else:
                 st.info("DB에 저장된 데이터가 없습니다.")
 
