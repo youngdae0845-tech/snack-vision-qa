@@ -44,22 +44,14 @@ def get_float_config(name, default):
 SUPABASE_URL = get_config("SUPABASE_URL")
 SUPABASE_KEY = get_config("SUPABASE_KEY")
 
-# Accuracy-first defaults for paid Railway resources.
 MASK_DIM = get_int_config("MASK_DIM", 2200)
 ANALYSIS_DIM = get_int_config("ANALYSIS_DIM", 2600)
+REMBG_MODEL = get_config("REMBG_MODEL", "isnet-general-use")
 
-# u2net is less likely than isnet-general-use to keep only a few "salient" pieces.
-REMBG_MODEL = get_config("REMBG_MODEL", "u2net")
-
-# Low alpha threshold keeps weakly detected snack regions instead of deleting them.
-MASK_THRESHOLD = get_int_config("MASK_THRESHOLD", 24)
+MASK_THRESHOLD = get_int_config("MASK_THRESHOLD", 128)
 MASK_KERNEL_SIZE = get_int_config("MASK_KERNEL_SIZE", 5)
 MASK_CLOSE_ITER = get_int_config("MASK_CLOSE_ITER", 1)
-MASK_ERODE_ITER = get_int_config("MASK_ERODE_ITER", 0)
-
-# The color mask rescues yellow/orange snack pixels when AI segmentation is too selective.
-USE_COLOR_RESCUE_MASK = get_config("USE_COLOR_RESCUE_MASK", "true").lower() != "false"
-COLOR_MASK_MIN_AREA_RATIO = get_float_config("COLOR_MASK_MIN_AREA_RATIO", 0.02)
+MASK_ERODE_ITER = get_int_config("MASK_ERODE_ITER", 1)
 
 REVIEW_THRESHOLD = get_float_config("REVIEW_THRESHOLD", 10.0)
 NG_THRESHOLD = get_float_config("NG_THRESHOLD", 20.0)
@@ -107,47 +99,6 @@ def normalize_kernel_size(size):
     return size if size % 2 == 1 else size + 1
 
 
-def largest_components_mask(mask, min_area_ratio=0.0002):
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    if num_labels <= 1:
-        return mask
-
-    image_area = mask.shape[0] * mask.shape[1]
-    min_area = max(24, int(image_area * min_area_ratio))
-    cleaned = np.zeros_like(mask)
-
-    for label in range(1, num_labels):
-        area = stats[label, cv2.CC_STAT_AREA]
-        if area >= min_area:
-            cleaned[labels == label] = 255
-
-    return cleaned
-
-
-def create_snack_color_mask(img):
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(hsv)
-
-    bgr_float = img.astype(np.float32) / 255.0
-    lab = cv2.cvtColor(bgr_float, cv2.COLOR_BGR2LAB)
-    l_channel = lab[:, :, 0]
-    a_channel = lab[:, :, 1]
-    b_channel = lab[:, :, 2]
-
-    orange_hue = (h >= 3) & (h <= 48) & (s >= 28) & (v >= 35)
-    warm_lab = (l_channel >= 18) & (a_channel >= -8) & (b_channel >= 8) & (s >= 18)
-    bright_yellow = (h >= 12) & (h <= 58) & (s >= 18) & (v >= 65)
-
-    color_mask = (orange_hue | warm_lab | bright_yellow).astype(np.uint8) * 255
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-    color_mask = largest_components_mask(color_mask)
-
-    return color_mask
-
-
 def create_precise_masks(original_img, analysis_img, session):
     mask_input_img = resize_by_max_dim(original_img, MASK_DIM)
     no_bg_img = remove(mask_input_img, session=session)
@@ -162,21 +113,12 @@ def create_precise_masks(original_img, analysis_img, session):
         interpolation=cv2.INTER_CUBIC,
     )
 
-    _, ai_mask = cv2.threshold(
+    _, display_mask = cv2.threshold(
         resized_alpha,
         MASK_THRESHOLD,
         255,
         cv2.THRESH_BINARY,
     )
-
-    display_mask = ai_mask
-    color_rescue_mask = None
-    if USE_COLOR_RESCUE_MASK:
-        color_rescue_mask = create_snack_color_mask(analysis_img)
-        color_area_ratio = np.count_nonzero(color_rescue_mask) / color_rescue_mask.size
-
-        if color_area_ratio >= COLOR_MASK_MIN_AREA_RATIO:
-            display_mask = cv2.bitwise_or(display_mask, color_rescue_mask)
 
     kernel_size = normalize_kernel_size(MASK_KERNEL_SIZE)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
@@ -189,13 +131,11 @@ def create_precise_masks(original_img, analysis_img, session):
             iterations=MASK_CLOSE_ITER,
         )
 
-    display_mask = largest_components_mask(display_mask)
-
     analysis_mask = display_mask.copy()
     if MASK_ERODE_ITER > 0:
         analysis_mask = cv2.erode(analysis_mask, kernel, iterations=MASK_ERODE_ITER)
 
-    return display_mask, analysis_mask, ai_mask, color_rescue_mask
+    return display_mask, analysis_mask
 
 
 def calculate_status(mean_delta_e):
@@ -223,11 +163,7 @@ def calculate_status(mean_delta_e):
 
 def analyze_image(original_img, session):
     analysis_img = resize_by_max_dim(original_img, ANALYSIS_DIM)
-    display_mask, analysis_mask, ai_mask, color_rescue_mask = create_precise_masks(
-        original_img,
-        analysis_img,
-        session,
-    )
+    display_mask, analysis_mask = create_precise_masks(original_img, analysis_img, session)
 
     core_pixels = analysis_mask > 0
     if np.count_nonzero(core_pixels) == 0:
@@ -235,12 +171,6 @@ def analyze_image(original_img, session):
 
     visual_masked_img = cv2.bitwise_and(analysis_img, analysis_img, mask=display_mask)
     core_masked_img = cv2.bitwise_and(analysis_img, analysis_img, mask=analysis_mask)
-
-    ai_masked_img = cv2.bitwise_and(analysis_img, analysis_img, mask=ai_mask)
-    if color_rescue_mask is None:
-        color_rescue_img = np.zeros_like(analysis_img)
-    else:
-        color_rescue_img = cv2.bitwise_and(analysis_img, analysis_img, mask=color_rescue_mask)
 
     bgr_float = analysis_img.astype(np.float32) / 255.0
     lab_img = cv2.cvtColor(bgr_float, cv2.COLOR_BGR2LAB)
@@ -276,8 +206,6 @@ def analyze_image(original_img, session):
         "analysis_img": analysis_img,
         "visual_masked_img": visual_masked_img,
         "core_masked_img": core_masked_img,
-        "ai_masked_img": ai_masked_img,
-        "color_rescue_img": color_rescue_img,
         "heatmap_masked": heatmap_masked,
         "delta_values": delta_values,
         "mean_bgr": mean_bgr,
@@ -291,13 +219,10 @@ def analyze_image(original_img, session):
         "std_delta_e": std_delta_e,
         "p95_delta_e": p95_delta_e,
         "sample_pixels": int(delta_values.size),
-        "mask_area_ratio": float(np.count_nonzero(display_mask) / display_mask.size),
-        "ai_area_ratio": float(np.count_nonzero(ai_mask) / ai_mask.size),
-        "color_area_ratio": 0.0 if color_rescue_mask is None else float(np.count_nonzero(color_rescue_mask) / color_rescue_mask.size),
     }
 
     del bgr_float, lab_img, lab_pixels, bgr_pixels, delta_map, heatmap_bgr, heatmap_blend
-    del display_mask, analysis_mask, ai_mask, color_rescue_mask, core_pixels
+    del display_mask, analysis_mask, core_pixels
     gc.collect()
     return result
 
@@ -710,8 +635,8 @@ st.markdown(
             <div class="brand-mark">Snack Vision QC</div>
             <div class="report-title">고정밀 완제품 색차 분석 리포트</div>
             <div class="report-subtitle">
-                AI 마스킹과 스낵 색상 기반 보조 마스크를 결합해 제품 영역 누락을 줄이고,
-                float Lab 색공간 기준으로 Delta E 분포와 P95 편차를 산출합니다.
+                고해상도 AI 마스킹과 float Lab 색공간 계산으로 평균색, Delta E 분포, P95 편차를 산출합니다.
+                마스크 경계 픽셀은 분석에서 제외해 배경 혼입을 줄였습니다.
             </div>
         </div>
         <div class="model-strip">
@@ -719,7 +644,6 @@ st.markdown(
             <span>Mask resolution: {MASK_DIM}px</span>
             <span>Color analysis: {ANALYSIS_DIM}px</span>
             <span>Segmentation model: {REMBG_MODEL}</span>
-            <span>Color rescue mask: {"on" if USE_COLOR_RESCUE_MASK else "off"}</span>
             <span>Reference: {target_text}</span>
         </div>
     </div>
@@ -761,7 +685,7 @@ with tab1:
             render_kpi("NG", f">= {NG_THRESHOLD:.1f}", "관리 한계 기준", "danger")
 
         st.caption(
-            "isnet이 제품을 일부만 잡으면 REMBG_MODEL=u2net, MASK_THRESHOLD=24, MASK_ERODE_ITER=0 조합을 권장합니다."
+            "기준색 비교가 필요하면 TARGET_L, TARGET_A, TARGET_B 값을 Railway Variables에 입력하세요."
         )
 
     with right_col:
@@ -786,15 +710,13 @@ with tab1:
                     st.error("이미지를 읽지 못했습니다. JPG 또는 PNG 파일을 다시 업로드해주세요.")
                     st.stop()
 
-                with st.spinner("AI 마스킹과 색상 보조 마스크를 결합해 분석 중입니다..."):
+                with st.spinner("고정밀 AI 마스킹과 색차 분석을 실행 중입니다..."):
                     ai_session = load_ai_model(REMBG_MODEL)
                     result = analyze_image(original_img, ai_session)
 
                 analysis_img = result["analysis_img"]
                 visual_masked_img = result["visual_masked_img"]
                 core_masked_img = result["core_masked_img"]
-                ai_masked_img = result["ai_masked_img"]
-                color_rescue_img = result["color_rescue_img"]
                 heatmap_masked = result["heatmap_masked"]
                 delta_values = result["delta_values"]
                 mean_bgr = result["mean_bgr"]
@@ -805,9 +727,6 @@ with tab1:
                 std_delta_e = result["std_delta_e"]
                 p95_delta_e = result["p95_delta_e"]
                 sample_pixels = result["sample_pixels"]
-                mask_area_ratio = result["mask_area_ratio"]
-                ai_area_ratio = result["ai_area_ratio"]
-                color_area_ratio = result["color_area_ratio"]
                 analysis_mode = result["analysis_mode"]
                 status_meta = calculate_status(mean_delta_e)
 
@@ -819,7 +738,7 @@ with tab1:
                 with kpi_cols[2]:
                     render_kpi("P95 Delta E", f"{p95_delta_e:.2f}", "상위 5% 편차 경계", "neutral")
                 with kpi_cols[3]:
-                    render_kpi("Mask Coverage", f"{mask_area_ratio * 100:.1f}%", f"AI {ai_area_ratio * 100:.1f}% / Color {color_area_ratio * 100:.1f}%", "blue")
+                    render_kpi("Sample Pixels", f"{sample_pixels:,}", "정밀 마스크 내부 픽셀", "blue")
 
                 st.write("")
                 status_col, color_col = st.columns([1, 1], gap="large")
@@ -844,13 +763,13 @@ with tab1:
                     st.pyplot(fig)
                     plt.close(fig)
 
-                render_panel_title("시각 검증", "AI 마스크와 색상 보조 마스크가 합쳐진 최종 제품 영역을 확인합니다.")
+                render_panel_title("시각 검증", "원본, 전체 마스크, 분석 코어 마스크, 실제 Delta E 히트맵을 비교합니다.")
                 img_col1, img_col2 = st.columns(2, gap="medium")
                 with img_col1:
                     st.markdown("**Raw Image**")
                     st.image(cv2.cvtColor(analysis_img, cv2.COLOR_BGR2RGB), use_container_width=True)
                 with img_col2:
-                    st.markdown("**Final Product Mask**")
+                    st.markdown("**Full AI Mask**")
                     st.image(cv2.cvtColor(visual_masked_img, cv2.COLOR_BGR2RGB), use_container_width=True)
 
                 img_col3, img_col4 = st.columns(2, gap="medium")
@@ -860,15 +779,6 @@ with tab1:
                 with img_col4:
                     st.markdown("**Delta E Heatmap**")
                     st.image(cv2.cvtColor(heatmap_masked, cv2.COLOR_BGR2RGB), use_container_width=True)
-
-                with st.expander("마스크 진단 보기"):
-                    diag_col1, diag_col2 = st.columns(2, gap="medium")
-                    with diag_col1:
-                        st.markdown("**AI Mask Only**")
-                        st.image(cv2.cvtColor(ai_masked_img, cv2.COLOR_BGR2RGB), use_container_width=True)
-                    with diag_col2:
-                        st.markdown("**Color Rescue Mask Only**")
-                        st.image(cv2.cvtColor(color_rescue_img, cv2.COLOR_BGR2RGB), use_container_width=True)
 
                 st.write("")
                 save_col, note_col = st.columns([0.35, 0.65])
@@ -898,7 +808,7 @@ with tab1:
                             st.error(f"저장 실패: {e}")
 
                 del original_img, analysis_img, visual_masked_img, core_masked_img
-                del ai_masked_img, color_rescue_img, heatmap_masked, delta_values, result
+                del heatmap_masked, delta_values, result
                 gc.collect()
 
             except Exception as e:
