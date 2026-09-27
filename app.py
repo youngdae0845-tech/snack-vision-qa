@@ -10,7 +10,7 @@ from rembg import new_session, remove
 from supabase import create_client
 
 # ==========================================
-# 0. 스트림릿 기본 설정 (문법 에러 방지)
+# 0. 스트림릿 기본 설정
 # ==========================================
 st.set_page_config(
     page_title="Snack Vision QC",
@@ -28,9 +28,9 @@ def get_config(name, default=None):
 SUPABASE_URL = get_config("SUPABASE_URL")
 SUPABASE_KEY = get_config("SUPABASE_KEY")
 
-# 안정적인 해상도 세팅 (OOM 방지)
-MASK_DIM = 1200
-ANALYSIS_DIM = 1400
+# 서버 메모리 업그레이드 반영 (초고해상도 정밀 분석)
+MASK_DIM = 2200
+ANALYSIS_DIM = 2600
 REMBG_MODEL = "u2net"
 
 MASK_THRESHOLD = 128
@@ -256,7 +256,7 @@ st.markdown(
         .tile-meta strong { display: block; color: var(--ink); margin-top: 4px; font-size: 13px; }
         
         .heatmap-frame { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 14px; min-height: 260px; }
-        .heatmap-empty { min-height: 340px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 28px 28px; border-radius: 8px; border: 1px solid var(--line); }
+        .heatmap-empty { min-height: 260px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 28px 28px; border-radius: 8px; border: 1px solid var(--line); }
         
         .legend-row { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 14px; font-size: 12px; color: var(--muted); }
         .legend-item { display: inline-flex; align-items: center; gap: 6px; }
@@ -425,7 +425,62 @@ with tab1:
 
     st.write("")
 
-    # 2. 간소화된 기록 저장 섹션 (LOT Number만 입력)
+    # 2. 타일과 히스토그램 가로 병렬 배치 (UI 변경점 1번)
+    tile_col, hist_col = st.columns([1, 1.6], gap="large")
+    
+    with tile_col:
+        render_number_heading("01", "평균 색상 타일")
+        render_color_tile(result["mean_bgr"] if has_result else None, result["sample_pixels"] if has_result else None)
+        
+    with hist_col:
+        render_number_heading("02", "색상 편차 분포 (ΔE 히스토그램)")
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        if has_result:
+            fig, ax = plt.subplots(figsize=(7, 3.2))
+            fig.patch.set_facecolor("#10141f")
+            ax.set_facecolor("#10141f")
+            ax.hist(result["delta_values"], bins=80, color="#3b82f6", edgecolor="#0a0e16", linewidth=0.3)
+            ax.axvline(result["mean_delta_e"], color="#d97706", linewidth=2, label="Mean")
+            ax.axvline(result["p95_delta_e"], color="#ef4444", linewidth=2, label="P95")
+            ax.set_xlabel("CIEDE2000 Delta E", fontsize=9, color="#7c8598")
+            ax.set_ylabel("Pixel Count", fontsize=9, color="#7c8598")
+            ax.tick_params(colors="#7c8598", labelsize=8)
+            ax.grid(axis="y", linestyle="--", alpha=0.15, color="#7c8598")
+            ax.legend(frameon=False, fontsize=8, labelcolor="#e6e9f2")
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_color("#232a3a")
+            ax.spines["bottom"].set_color("#232a3a")
+            plt.tight_layout()
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+            render_footer_stats(n=result["sample_pixels"], min_v=result["min_delta_e"], max_v=result["max_delta_e"], threshold=result["review_threshold"])
+        else:
+            st.markdown('<div class="heatmap-empty" style="min-height:220px;">이미지를 업로드하고 분석을 실행하세요</div>', unsafe_allow_html=True)
+            render_footer_stats()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # 3. 시각 검증 패널 (기존 맵 자리 대체 - UI 변경점 2번)
+    st.write("")
+    render_number_heading("03", "시각 검증 (Visual Validation)")
+    if has_result:
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        img_col1, img_col2, img_col3 = st.columns(3, gap="medium")
+        with img_col1:
+            st.markdown("**Raw Image**", help="원본 이미지")
+            st.image(cv2.cvtColor(result["analysis_img"], cv2.COLOR_BGR2RGB), use_container_width=True)
+        with img_col2:
+            st.markdown("**Analysis Core Mask**", help="배경 노이즈가 제거된 AI 마스킹 코어")
+            st.image(cv2.cvtColor(result["core_masked_img"], cv2.COLOR_BGR2RGB), use_container_width=True)
+        with img_col3:
+            st.markdown("**Delta E Heatmap**", help="타겟 색상 대비 오차(ΔE)를 시각화한 열지도")
+            st.image(cv2.cvtColor(result["heatmap_masked"], cv2.COLOR_BGR2RGB), use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="section-card"><div class="heatmap-empty" style="min-height:200px;">이미지를 업로드하고 분석을 실행하세요</div></div>', unsafe_allow_html=True)
+
+    # 4. 기록 저장 섹션 최하단 이동 (UI 변경점 3번)
+    st.write("")
     st.markdown('<div class="section-heading"><span class="section-number">+</span><span class="section-title">기록 저장</span></div>', unsafe_allow_html=True)
     with st.container():
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -460,71 +515,6 @@ with tab1:
                     st.success("✅ Supabase에 검사 결과가 정상 기록되었습니다.")
                 except Exception as e:
                     st.error(f"저장 실패: {e}")
-
-    st.write("")
-
-    # 3. 평균 타일 & 히트맵
-    tile_col, map_col = st.columns([1, 1.6], gap="large")
-    with tile_col:
-        render_number_heading("01", "평균 색상 타일")
-        render_color_tile(result["mean_bgr"] if has_result else None, result["sample_pixels"] if has_result else None)
-
-    with map_col:
-        render_number_heading("02", "편차 오버레이 맵")
-        st.markdown('<div class="heatmap-frame">', unsafe_allow_html=True)
-        if has_result:
-            st.image(cv2.cvtColor(result["heatmap_masked"], cv2.COLOR_BGR2RGB), use_container_width=True)
-        else:
-            st.markdown('<div class="heatmap-empty">이미지를 업로드하고 분석을 실행하세요</div>', unsafe_allow_html=True)
-        render_legend()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    st.write("")
-
-    # 4. 히스토그램 
-    render_number_heading("03", "색상 편차 분포 (ΔE 히스토그램)")
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    if has_result:
-        fig, ax = plt.subplots(figsize=(9.6, 3.2))
-        fig.patch.set_facecolor("#10141f")
-        ax.set_facecolor("#10141f")
-        ax.hist(result["delta_values"], bins=80, color="#3b82f6", edgecolor="#0a0e16", linewidth=0.3)
-        ax.axvline(result["mean_delta_e"], color="#d97706", linewidth=2, label="Mean")
-        ax.axvline(result["p95_delta_e"], color="#ef4444", linewidth=2, label="P95")
-        ax.set_xlabel("CIEDE2000 Delta E", fontsize=9, color="#7c8598")
-        ax.set_ylabel("Pixel Count", fontsize=9, color="#7c8598")
-        ax.tick_params(colors="#7c8598", labelsize=8)
-        ax.grid(axis="y", linestyle="--", alpha=0.15, color="#7c8598")
-        ax.legend(frameon=False, fontsize=8, labelcolor="#e6e9f2")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.spines["left"].set_color("#232a3a")
-        ax.spines["bottom"].set_color("#232a3a")
-        plt.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
-        render_footer_stats(n=result["sample_pixels"], min_v=result["min_delta_e"], max_v=result["max_delta_e"], threshold=result["review_threshold"])
-    else:
-        st.markdown('<div class="heatmap-empty" style="min-height:220px;">이미지를 업로드하고 분석을 실행하세요</div>', unsafe_allow_html=True)
-        render_footer_stats()
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # 5. 시각 검증 패널 (나란히 3장)
-    if has_result:
-        st.write("")
-        st.markdown('<div class="section-heading"><span class="section-number">04</span><span class="section-title">시각 검증 (Visual Validation)</span></div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        img_col1, img_col2, img_col3 = st.columns(3, gap="medium")
-        with img_col1:
-            st.markdown("**Raw Image**", help="원본 이미지")
-            st.image(cv2.cvtColor(result["analysis_img"], cv2.COLOR_BGR2RGB), use_container_width=True)
-        with img_col2:
-            st.markdown("**Analysis Core Mask**", help="배경 노이즈가 제거된 AI 마스킹 코어")
-            st.image(cv2.cvtColor(result["core_masked_img"], cv2.COLOR_BGR2RGB), use_container_width=True)
-        with img_col3:
-            st.markdown("**Delta E Heatmap**", help="타겟 색상 대비 오차(ΔE)를 시각화한 열지도")
-            st.image(cv2.cvtColor(result["heatmap_masked"], cv2.COLOR_BGR2RGB), use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # 탭 2: 펠릿 크기 분석
@@ -568,7 +558,6 @@ with tab3:
                     st.line_chart(chart_df, color="#3b82f6")
 
                 st.write("")
-                # DB 항목이 없으므로 심플한 항목들만 필터링하여 출력
                 columns_to_show = [c for c in ["created_at", "lot_number", "avg_l", "avg_a", "avg_b", "delta_e", "defect_type", "status"] if c in df.columns]
                 st.dataframe(df[columns_to_show], use_container_width=True, hide_index=True)
 
