@@ -28,10 +28,12 @@ def get_config(name, default=None):
 SUPABASE_URL = get_config("SUPABASE_URL")
 SUPABASE_KEY = get_config("SUPABASE_KEY")
 
-# 서버 메모리 업그레이드 반영 (초고해상도 정밀 분석)
+# ==========================================
+# [수정] 고정밀 누끼 AI 및 초고해상도 복구
+# ==========================================
 MASK_DIM = 2200
 ANALYSIS_DIM = 2600
-REMBG_MODEL = "u2net"
+REMBG_MODEL = "isnet-general-use"  # 뭉툭하게 따이는 현상 해결을 위한 고성능 모델 복구
 
 MASK_THRESHOLD = 128
 MASK_KERNEL_SIZE = 5
@@ -69,10 +71,12 @@ def create_precise_masks(original_img, analysis_img, session):
         raise ValueError("배경 제거 결과에 alpha 채널이 없습니다.")
 
     alpha = no_bg_img[:, :, 3].astype(np.uint8)
+    
+    # [수정] 경계선 픽셀 보간법을 고정밀(CUBIC)로 복구
     resized_alpha = cv2.resize(
         alpha,
         (analysis_img.shape[1], analysis_img.shape[0]),
-        interpolation=cv2.INTER_LINEAR,
+        interpolation=cv2.INTER_CUBIC,
     )
 
     _, display_mask = cv2.threshold(resized_alpha, MASK_THRESHOLD, 255, cv2.THRESH_BINARY)
@@ -149,7 +153,6 @@ def analyze_image(original_img, session, target_lab, review_threshold):
     else:
         reference_lab = target_lab
 
-    # CIEDE2000 연산
     ref_lab_array = np.full_like(lab_pixels, reference_lab)
     delta_values = deltaE_ciede2000(lab_pixels, ref_lab_array).astype(np.float32)
     
@@ -248,14 +251,14 @@ st.markdown(
         
         .section-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
         
-        .tile-card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 14px; min-height: 260px; display: flex; flex-direction: column; }
-        .tile-swatch { width: 100%; flex: 1; min-height: 170px; border-radius: 8px; border: 1px solid var(--line); }
+        /* [수정] 타일 카드 크기를 히스토그램 박스와 유사하게 맞춤 */
+        .tile-card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 20px; min-height: 400px; display: flex; flex-direction: column; }
+        .tile-swatch { width: 100%; flex: 1; min-height: 250px; border-radius: 8px; border: 1px solid var(--line); }
         .tile-swatch-empty { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; background: repeating-linear-gradient(45deg, #0d1220, #0d1220 10px, #10141f 10px, #10141f 20px); }
-        .tile-meta { display: flex; justify-content: space-between; margin-top: 12px; font-size: 12px; }
-        .tile-meta span { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
-        .tile-meta strong { display: block; color: var(--ink); margin-top: 4px; font-size: 13px; }
+        .tile-meta { display: flex; justify-content: space-between; margin-top: 16px; font-size: 12px; }
+        .tile-meta span { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+        .tile-meta strong { display: block; color: var(--ink); margin-top: 6px; font-size: 15px; }
         
-        .heatmap-frame { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 14px; min-height: 260px; }
         .heatmap-empty { min-height: 260px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 28px 28px; border-radius: 8px; border: 1px solid var(--line); }
         
         .legend-row { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 14px; font-size: 12px; color: var(--muted); }
@@ -316,7 +319,6 @@ def render_footer_stats(n=None, min_v=None, max_v=None, threshold=None):
     th_text = f"{threshold:.1f}" if threshold is not None else "—"
     st.markdown(f'<div class="footer-stats"><span>N <strong>{n_text}</strong> px</span><span>MIN <strong>{min_text}</strong></span><span>MAX <strong>{max_text}</strong></span><span>THRESHOLD <strong>{th_text}</strong></span></div>', unsafe_allow_html=True)
 
-
 supabase = get_supabase_client()
 
 # ---------------------------------------------------------------------------
@@ -344,7 +346,6 @@ if "result" not in st.session_state:
 if "result_error" not in st.session_state:
     st.session_state.result_error = None
 
-# 이미지 분석 실행 로직 (상태 저장)
 if run_clicked and uploaded_file is not None:
     try:
         file_bytes = np.frombuffer(uploaded_file.getvalue(), dtype=np.uint8)
@@ -425,8 +426,8 @@ with tab1:
 
     st.write("")
 
-    # 2. 타일과 히스토그램 가로 병렬 배치 (UI 변경점 1번)
-    tile_col, hist_col = st.columns([1, 1.6], gap="large")
+    # 2. 타일과 히스토그램 1:1 비율 나란히 배치 
+    tile_col, hist_col = st.columns([1, 1], gap="large")
     
     with tile_col:
         render_number_heading("01", "평균 색상 타일")
@@ -434,9 +435,9 @@ with tab1:
         
     with hist_col:
         render_number_heading("02", "색상 편차 분포 (ΔE 히스토그램)")
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.markdown('<div class="section-card" style="min-height: 400px; display: flex; flex-direction: column; justify-content: center;">', unsafe_allow_html=True)
         if has_result:
-            fig, ax = plt.subplots(figsize=(7, 3.2))
+            fig, ax = plt.subplots(figsize=(6, 3.8))
             fig.patch.set_facecolor("#10141f")
             ax.set_facecolor("#10141f")
             ax.hist(result["delta_values"], bins=80, color="#3b82f6", edgecolor="#0a0e16", linewidth=0.3)
@@ -456,11 +457,11 @@ with tab1:
             plt.close(fig)
             render_footer_stats(n=result["sample_pixels"], min_v=result["min_delta_e"], max_v=result["max_delta_e"], threshold=result["review_threshold"])
         else:
-            st.markdown('<div class="heatmap-empty" style="min-height:220px;">이미지를 업로드하고 분석을 실행하세요</div>', unsafe_allow_html=True)
+            st.markdown('<div class="heatmap-empty">이미지를 업로드하고 분석을 실행하세요</div>', unsafe_allow_html=True)
             render_footer_stats()
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 3. 시각 검증 패널 (기존 맵 자리 대체 - UI 변경점 2번)
+    # 3. 시각 검증 패널 (기존 맵 자리를 대체하여 위로 배치)
     st.write("")
     render_number_heading("03", "시각 검증 (Visual Validation)")
     if has_result:
@@ -475,11 +476,12 @@ with tab1:
         with img_col3:
             st.markdown("**Delta E Heatmap**", help="타겟 색상 대비 오차(ΔE)를 시각화한 열지도")
             st.image(cv2.cvtColor(result["heatmap_masked"], cv2.COLOR_BGR2RGB), use_container_width=True)
+            render_legend()
         st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="section-card"><div class="heatmap-empty" style="min-height:200px;">이미지를 업로드하고 분석을 실행하세요</div></div>', unsafe_allow_html=True)
 
-    # 4. 기록 저장 섹션 최하단 이동 (UI 변경점 3번)
+    # 4. 기록 저장 섹션 (최하단 이동)
     st.write("")
     st.markdown('<div class="section-heading"><span class="section-number">+</span><span class="section-title">기록 저장</span></div>', unsafe_allow_html=True)
     with st.container():
@@ -523,7 +525,7 @@ with tab2:
     st.markdown('<div class="placeholder-card"><strong>펠릿 크기 분석 모듈</strong>이 모듈은 준비 중입니다.</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# 탭 3: 기록 관리 (간소화)
+# 탭 3: 기록 관리
 # ---------------------------------------------------------------------------
 with tab3:
     top_cols = st.columns([0.8, 0.2])
