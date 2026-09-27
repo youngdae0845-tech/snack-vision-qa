@@ -14,7 +14,7 @@ st.set_page_config(
     page_title="Snack Vision QC",
     page_icon="SV",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 
@@ -53,14 +53,22 @@ MASK_KERNEL_SIZE = get_int_config("MASK_KERNEL_SIZE", 5)
 MASK_CLOSE_ITER = get_int_config("MASK_CLOSE_ITER", 1)
 MASK_ERODE_ITER = get_int_config("MASK_ERODE_ITER", 1)
 
-REVIEW_THRESHOLD_DEFAULT = get_float_config("REVIEW_THRESHOLD", 5.0)
+REVIEW_THRESHOLD = get_float_config("REVIEW_THRESHOLD", 10.0)
 NG_THRESHOLD = get_float_config("NG_THRESHOLD", 20.0)
 HEATMAP_MAX_DELTA_E = get_float_config("HEATMAP_MAX_DELTA_E", 30.0)
-EXCELLENT_THRESHOLD = get_float_config("EXCELLENT_THRESHOLD", 3.0)
 
-TARGET_L_DEFAULT = get_float_config("TARGET_L", 165.0)
-TARGET_A_DEFAULT = get_float_config("TARGET_A", 149.0)
-TARGET_B_DEFAULT = get_float_config("TARGET_B", 165.0)
+TARGET_L = get_config("TARGET_L")
+TARGET_A = get_config("TARGET_A")
+TARGET_B = get_config("TARGET_B")
+
+
+def get_target_lab():
+    if TARGET_L is None or TARGET_A is None or TARGET_B is None:
+        return None
+    try:
+        return np.array([float(TARGET_L), float(TARGET_A), float(TARGET_B)], dtype=np.float32)
+    except ValueError:
+        return None
 
 
 @st.cache_resource
@@ -130,45 +138,30 @@ def create_precise_masks(original_img, analysis_img, session):
     return display_mask, analysis_mask
 
 
-def calculate_status(mean_delta_e, review_threshold):
+def calculate_status(mean_delta_e):
     if mean_delta_e >= NG_THRESHOLD:
         return {
             "status": "NG",
             "label": "관리 한계 초과",
             "tone": "danger",
-            "grade": "불량",
-            "grade_desc": "뭉침/편중",
             "message": "색상 편차가 높습니다. 시즈닝 뭉침, 과열, 조명 조건을 확인하세요.",
         }
-    if mean_delta_e >= review_threshold:
+    if mean_delta_e >= REVIEW_THRESHOLD:
         return {
             "status": "REVIEW",
             "label": "검토 필요",
             "tone": "warning",
-            "grade": "경계",
-            "grade_desc": "시즈닝 편중 의심",
             "message": "색상 편차가 기준 근처입니다. LOT 샘플 재확인을 권장합니다.",
-        }
-    if mean_delta_e < EXCELLENT_THRESHOLD:
-        return {
-            "status": "OK",
-            "label": "정상 범위",
-            "tone": "success",
-            "grade": "우수",
-            "grade_desc": "ΔE < 3",
-            "message": "색상 균일도가 매우 안정적입니다.",
         }
     return {
         "status": "OK",
         "label": "정상 범위",
         "tone": "success",
-        "grade": "합격",
-        "grade_desc": "기준 이내",
         "message": "색상 균일도가 안정적입니다. 현재 기준에서는 정상으로 판단됩니다.",
     }
 
 
-def analyze_image(original_img, session, target_lab, review_threshold):
+def analyze_image(original_img, session):
     analysis_img = resize_by_max_dim(original_img, ANALYSIS_DIM)
     display_mask, analysis_mask = create_precise_masks(original_img, analysis_img, session)
 
@@ -187,6 +180,7 @@ def analyze_image(original_img, session, target_lab, review_threshold):
     mean_lab = lab_pixels.mean(axis=0)
     mean_bgr = bgr_pixels.mean(axis=0)
 
+    target_lab = get_target_lab()
     if target_lab is None:
         reference_lab = mean_lab
         analysis_mode = "내부 균일도 기준"
@@ -198,8 +192,6 @@ def analyze_image(original_img, session, target_lab, review_threshold):
     mean_delta_e = float(delta_values.mean()) if delta_values.size else 0.0
     std_delta_e = float(delta_values.std()) if delta_values.size else 0.0
     p95_delta_e = float(np.percentile(delta_values, 95)) if delta_values.size else 0.0
-    min_delta_e = float(delta_values.min()) if delta_values.size else 0.0
-    max_delta_e = float(delta_values.max()) if delta_values.size else 0.0
 
     delta_map = np.zeros(core_pixels.shape, dtype=np.float32)
     delta_map[core_pixels] = delta_values
@@ -209,8 +201,6 @@ def analyze_image(original_img, session, target_lab, review_threshold):
     heatmap_bgr = cv2.applyColorMap(heatmap_gray, cv2.COLORMAP_TURBO)
     heatmap_blend = cv2.addWeighted(analysis_img, 0.52, heatmap_bgr, 0.48, 0)
     heatmap_masked = cv2.bitwise_and(heatmap_blend, heatmap_blend, mask=display_mask)
-
-    status_meta = calculate_status(mean_delta_e, review_threshold)
 
     result = {
         "analysis_img": analysis_img,
@@ -228,11 +218,7 @@ def analyze_image(original_img, session, target_lab, review_threshold):
         "mean_delta_e": mean_delta_e,
         "std_delta_e": std_delta_e,
         "p95_delta_e": p95_delta_e,
-        "min_delta_e": min_delta_e,
-        "max_delta_e": max_delta_e,
         "sample_pixels": int(delta_values.size),
-        "status_meta": status_meta,
-        "review_threshold": review_threshold,
     }
 
     del bgr_float, lab_img, lab_pixels, bgr_pixels, delta_map, heatmap_bgr, heatmap_blend
@@ -241,28 +227,7 @@ def analyze_image(original_img, session, target_lab, review_threshold):
     return result
 
 
-def safe_table_columns(df, columns):
-    existing = [column for column in columns if column in df.columns]
-    return df[existing] if existing else df
-
-
-# ---------------------------------------------------------------------------
-# Rendering helpers (dark instrument-panel theme)
-# ---------------------------------------------------------------------------
-
-def render_number_heading(number, title):
-    st.markdown(
-        f"""
-        <div class="section-heading">
-            <span class="section-number">{number}</span>
-            <span class="section-title">{title}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_kpi_card(label, value, helper, tone="neutral"):
+def render_kpi(label, value, helper, tone="neutral"):
     st.markdown(
         f"""
         <div class="kpi-card kpi-{tone}">
@@ -275,44 +240,39 @@ def render_kpi_card(label, value, helper, tone="neutral"):
     )
 
 
-def render_status_pill(text, active=False):
-    dot_class = "dot-active" if active else "dot-idle"
+def render_status_panel(meta, mean_delta_e, std_delta_e, p95_delta_e):
     st.markdown(
         f"""
-        <div class="status-pill">
-            <span class="{dot_class}"></span>{text}
+        <div class="status-panel status-{meta["tone"]}">
+            <div class="status-eyebrow">Final QA Decision</div>
+            <div class="status-main">{meta["status"]}</div>
+            <div class="status-label">{meta["label"]}</div>
+            <div class="status-copy">{meta["message"]}</div>
+            <div class="status-grid">
+                <div><span>Mean Delta E</span><strong>{mean_delta_e:.2f}</strong></div>
+                <div><span>Std Dev</span><strong>{std_delta_e:.2f}</strong></div>
+                <div><span>P95 Delta E</span><strong>{p95_delta_e:.2f}</strong></div>
+                <div><span>NG Threshold</span><strong>{NG_THRESHOLD:.1f}</strong></div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def render_color_tile(mean_bgr=None, sample_pixels=None):
-    if mean_bgr is None:
-        st.markdown(
-            """
-            <div class="tile-card">
-                <div class="tile-swatch tile-swatch-empty">이미지 대기 중</div>
-                <div class="tile-meta">
-                    <div><span>RGB</span><strong>—</strong></div>
-                    <div><span>PIXELS</span><strong>—</strong></div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        return
-
+def render_color_chip(mean_bgr, avg_l, avg_a, avg_b):
     r = int(np.clip(mean_bgr[2], 0, 255))
     g = int(np.clip(mean_bgr[1], 0, 255))
     b = int(np.clip(mean_bgr[0], 0, 255))
+
     st.markdown(
         f"""
-        <div class="tile-card">
-            <div class="tile-swatch" style="background: rgb({r}, {g}, {b});"></div>
-            <div class="tile-meta">
-                <div><span>RGB</span><strong>{r}, {g}, {b}</strong></div>
-                <div><span>PIXELS</span><strong>{sample_pixels:,}</strong></div>
+        <div class="color-chip-card">
+            <div class="color-swatch" style="background: rgb({r}, {g}, {b});"></div>
+            <div>
+                <div class="color-title">Average Product Color</div>
+                <div class="color-values">L {avg_l:.1f} / a {avg_a:.1f} / b {avg_b:.1f}</div>
+                <div class="color-helper">정밀 분석 마스크 내부 픽셀 기준</div>
             </div>
         </div>
         """,
@@ -320,36 +280,21 @@ def render_color_tile(mean_bgr=None, sample_pixels=None):
     )
 
 
-def render_legend():
-    st.markdown(
-        """
-        <div class="legend-row">
-            <span class="legend-item"><span class="legend-dot legend-green"></span>우수 (ΔE&lt;3)</span>
-            <span class="legend-item"><span class="legend-dot legend-blue"></span>합격</span>
-            <span class="legend-item"><span class="legend-dot legend-amber"></span>경계 (시즈닝 편중 의심)</span>
-            <span class="legend-item"><span class="legend-dot legend-red"></span>불량 (뭉침/편중)</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_footer_stats(n=None, min_v=None, max_v=None, threshold=None):
-    n_text = f"{n:,}" if n is not None else "—"
-    min_text = f"{min_v:.2f}" if min_v is not None else "—"
-    max_text = f"{max_v:.2f}" if max_v is not None else "—"
-    th_text = f"{threshold:.1f}" if threshold is not None else "—"
+def render_panel_title(title, caption):
     st.markdown(
         f"""
-        <div class="footer-stats">
-            <span>N <strong>{n_text}</strong> px</span>
-            <span>MIN <strong>{min_text}</strong></span>
-            <span>MAX <strong>{max_text}</strong></span>
-            <span>THRESHOLD <strong>{th_text}</strong></span>
+        <div class="panel-title">
+            <div class="panel-heading">{title}</div>
+            <div class="panel-caption">{caption}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def safe_table_columns(df, columns):
+    existing = [column for column in columns if column in df.columns]
+    return df[existing] if existing else df
 
 
 supabase = get_supabase_client()
@@ -358,17 +303,16 @@ st.markdown(
     """
     <style>
         :root {
-            --bg: #0a0e16;
-            --panel: #10141f;
-            --panel-2: #141926;
-            --line: #232a3a;
-            --ink: #e6e9f2;
-            --muted: #7c8598;
+            --bg: #f5f7fb;
+            --panel: #ffffff;
+            --ink: #111827;
+            --muted: #667085;
+            --line: #e5e7eb;
             --navy: #0f2742;
-            --blue: #3b82f6;
+            --blue: #2563eb;
             --amber: #d97706;
-            --green: #16a34a;
-            --red: #ef4444;
+            --green: #15803d;
+            --red: #dc2626;
         }
 
         .stApp {
@@ -386,133 +330,116 @@ st.markdown(
             visibility: hidden;
         }
 
-        section[data-testid="stSidebar"] {
-            background: var(--panel);
-            border-right: 1px solid var(--line);
-        }
-
-        section[data-testid="stSidebar"] .block-container {
-            padding-top: 1.6rem;
-        }
-
-        section[data-testid="stSidebar"] label,
-        section[data-testid="stSidebar"] p,
-        section[data-testid="stSidebar"] span {
-            color: var(--ink) !important;
-        }
-
-        .sidebar-eyebrow {
-            font-size: 11px;
-            font-weight: 800;
-            letter-spacing: .08em;
-            text-transform: uppercase;
-            color: var(--muted);
-            margin-bottom: 6px;
-        }
-
-        .sidebar-group-title {
-            font-size: 11px;
-            font-weight: 800;
-            letter-spacing: .06em;
-            text-transform: uppercase;
-            color: var(--muted);
-            margin: 18px 0 10px;
-            border-top: 1px solid var(--line);
-            padding-top: 16px;
-        }
-
         .report-header {
             display: flex;
             justify-content: space-between;
             align-items: flex-start;
             gap: 24px;
-            padding: 22px 26px;
+            padding: 24px 26px;
             margin-bottom: 18px;
-            background: var(--panel);
+            background: #ffffff;
             border: 1px solid var(--line);
             border-radius: 10px;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
         }
 
         .brand-mark {
-            font-size: 11px;
+            font-size: 12px;
             font-weight: 800;
             color: var(--blue);
             text-transform: uppercase;
-            letter-spacing: .1em;
+            letter-spacing: .08em;
             margin-bottom: 8px;
         }
 
         .report-title {
-            font-size: 26px;
-            line-height: 1.2;
-            font-weight: 800;
-            color: var(--ink);
+            font-size: 30px;
+            line-height: 1.15;
+            font-weight: 850;
+            color: var(--navy);
             margin-bottom: 8px;
         }
 
         .report-subtitle {
-            font-size: 13px;
-            color: var(--muted);
-            max-width: 720px;
-            line-height: 1.6;
-        }
-
-        .status-pill {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 8px 14px;
-            border: 1px solid var(--line);
-            border-radius: 999px;
-            font-size: 12px;
-            font-weight: 700;
-            color: var(--ink);
-            white-space: nowrap;
-        }
-
-        .dot-idle, .dot-active {
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            display: inline-block;
-        }
-
-        .dot-idle { background: var(--muted); }
-        .dot-active { background: var(--green); box-shadow: 0 0 6px var(--green); }
-
-        .section-heading {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin: 4px 0 12px;
-        }
-
-        .section-number {
-            width: 22px;
-            height: 22px;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            border: 1px solid var(--line);
-            border-radius: 6px;
-            font-size: 11px;
-            font-weight: 800;
-            color: var(--muted);
-        }
-
-        .section-title {
             font-size: 14px;
+            color: var(--muted);
+            max-width: 820px;
+        }
+
+        .model-strip {
+            min-width: 300px;
+            padding: 14px 16px;
+            border: 1px solid #dbe4f0;
+            border-radius: 8px;
+            background: #f8fafc;
+        }
+
+        .model-strip div:first-child {
+            font-size: 12px;
             font-weight: 800;
-            color: var(--ink);
+            color: var(--navy);
+            margin-bottom: 8px;
+        }
+
+        .model-strip span {
+            display: block;
+            font-size: 12px;
+            color: var(--muted);
+            line-height: 1.7;
+        }
+
+        .upload-note {
+            background: #ffffff;
+            border: 1px dashed #b6c2d2;
+            border-radius: 10px;
+            padding: 22px;
+            margin: 8px 0 16px;
+        }
+
+        .upload-note strong {
+            display: block;
+            color: var(--navy);
+            font-size: 17px;
+            margin-bottom: 6px;
+        }
+
+        .upload-note span {
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .panel-title {
+            margin: 8px 0 12px;
+        }
+
+        .panel-heading {
+            font-size: 15px;
+            font-weight: 850;
+            color: var(--navy);
+        }
+
+        .panel-caption {
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 2px;
+        }
+
+        .section-card {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 18px;
+            box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
         }
 
         .kpi-card {
-            min-height: 110px;
-            background: var(--panel);
+            min-height: 118px;
+            background: #ffffff;
             border: 1px solid var(--line);
-            border-top: 3px solid #3a4256;
+            border-top: 4px solid #94a3b8;
             border-radius: 10px;
             padding: 16px;
+            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
         }
 
         .kpi-success { border-top-color: var(--green); }
@@ -521,20 +448,19 @@ st.markdown(
         .kpi-blue { border-top-color: var(--blue); }
 
         .kpi-label {
-            font-size: 11px;
+            font-size: 12px;
             color: var(--muted);
             font-weight: 750;
             text-transform: uppercase;
-            letter-spacing: .06em;
+            letter-spacing: .04em;
         }
 
         .kpi-value {
-            font-size: 26px;
+            font-size: 28px;
             line-height: 1.2;
-            font-weight: 800;
+            font-weight: 850;
             color: var(--ink);
             margin-top: 8px;
-            font-variant-numeric: tabular-nums;
         }
 
         .kpi-helper {
@@ -543,232 +469,155 @@ st.markdown(
             margin-top: 8px;
         }
 
-        .section-card {
-            background: var(--panel);
-            border: 1px solid var(--line);
+        .status-panel {
+            min-height: 330px;
             border-radius: 10px;
-            padding: 18px;
+            padding: 22px;
+            color: #ffffff;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
         }
 
-        .tile-card {
-            background: var(--panel-2);
-            border: 1px solid var(--line);
-            border-radius: 10px;
-            padding: 14px;
-            min-height: 260px;
-            display: flex;
-            flex-direction: column;
-        }
+        .status-success { background: #14532d; }
+        .status-warning { background: #92400e; }
+        .status-danger { background: #991b1b; }
 
-        .tile-swatch {
-            width: 100%;
-            flex: 1;
-            min-height: 170px;
-            border-radius: 8px;
-            border: 1px solid var(--line);
-        }
-
-        .tile-swatch-empty {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: var(--muted);
-            font-size: 13px;
-            background: repeating-linear-gradient(45deg, #0d1220, #0d1220 10px, #10141f 10px, #10141f 20px);
-        }
-
-        .tile-meta {
-            display: flex;
-            justify-content: space-between;
-            margin-top: 12px;
-            font-size: 12px;
-        }
-
-        .tile-meta span {
-            display: block;
-            color: var(--muted);
-            font-size: 10px;
+        .status-eyebrow {
+            font-size: 11px;
+            font-weight: 850;
             text-transform: uppercase;
-            letter-spacing: .05em;
+            letter-spacing: .08em;
+            opacity: .78;
         }
 
-        .tile-meta strong {
-            display: block;
-            color: var(--ink);
-            margin-top: 4px;
+        .status-main {
+            font-size: 54px;
+            line-height: 1;
+            font-weight: 900;
+            margin-top: 18px;
+        }
+
+        .status-label {
+            font-size: 18px;
+            font-weight: 800;
+            margin-top: 8px;
+        }
+
+        .status-copy {
             font-size: 13px;
+            line-height: 1.55;
+            opacity: .9;
+            margin-top: 12px;
         }
 
-        .heatmap-frame {
-            background: var(--panel-2);
-            border: 1px solid var(--line);
-            border-radius: 10px;
-            padding: 14px;
-            min-height: 260px;
-        }
-
-        .heatmap-empty {
-            min-height: 340px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: var(--muted);
-            font-size: 13px;
-            background-image:
-                linear-gradient(var(--line) 1px, transparent 1px),
-                linear-gradient(90deg, var(--line) 1px, transparent 1px);
-            background-size: 28px 28px;
-            border-radius: 8px;
-            border: 1px solid var(--line);
-        }
-
-        .legend-row {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 18px;
-            margin-top: 14px;
-            font-size: 12px;
-            color: var(--muted);
-        }
-
-        .legend-item {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .legend-dot {
-            width: 9px;
-            height: 9px;
-            border-radius: 50%;
-            display: inline-block;
-        }
-
-        .legend-green { background: var(--green); }
-        .legend-blue { background: var(--blue); }
-        .legend-amber { background: var(--amber); }
-        .legend-red { background: var(--red); }
-
-        .footer-stats {
-            display: flex;
-            gap: 24px;
-            margin-top: 14px;
-            padding-top: 12px;
-            border-top: 1px solid var(--line);
-            font-size: 12px;
-            color: var(--muted);
-        }
-
-        .footer-stats strong {
-            color: var(--ink);
-            margin-left: 4px;
-        }
-
-        .status-summary {
+        .status-grid {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 10px;
+            margin-top: 20px;
+        }
+
+        .status-grid div {
+            padding: 10px;
+            background: rgba(255, 255, 255, .13);
+            border: 1px solid rgba(255, 255, 255, .18);
+            border-radius: 8px;
+        }
+
+        .status-grid span {
+            display: block;
+            font-size: 11px;
+            opacity: .75;
+        }
+
+        .status-grid strong {
+            display: block;
+            font-size: 20px;
+            margin-top: 4px;
+        }
+
+        .color-chip-card {
+            display: grid;
+            grid-template-columns: 106px 1fr;
+            gap: 14px;
+            align-items: center;
+            background: #ffffff;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 14px;
+            min-height: 136px;
+        }
+
+        .color-swatch {
+            width: 106px;
+            height: 106px;
+            border-radius: 8px;
+            border: 1px solid rgba(15, 23, 42, .14);
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .25);
+        }
+
+        .color-title {
+            font-size: 13px;
+            color: var(--muted);
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+        }
+
+        .color-values {
+            font-size: 21px;
+            font-weight: 850;
+            color: var(--ink);
+            margin-top: 8px;
+        }
+
+        .color-helper {
+            font-size: 12px;
+            color: var(--muted);
             margin-top: 6px;
         }
 
-        .status-summary div {
-            padding: 10px;
-            background: var(--panel-2);
-            border: 1px solid var(--line);
-            border-radius: 8px;
-        }
-
-        .status-summary span {
-            display: block;
-            font-size: 11px;
-            color: var(--muted);
-        }
-
-        .status-summary strong {
-            display: block;
-            font-size: 18px;
-            margin-top: 4px;
-            color: var(--ink);
-        }
-
-        .placeholder-card {
-            background: var(--panel);
-            border: 1px dashed var(--line);
-            border-radius: 10px;
-            padding: 60px 24px;
-            text-align: center;
-            color: var(--muted);
-        }
-
-        .placeholder-card strong {
-            display: block;
-            color: var(--ink);
-            font-size: 17px;
-            margin-bottom: 8px;
-        }
-
         [data-testid="stImage"] {
-            border-radius: 8px;
+            border-radius: 10px;
             overflow: hidden;
             border: 1px solid var(--line);
+            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
         }
 
         .stTabs [data-baseweb="tab-list"] {
-            gap: 6px;
-            margin-bottom: 14px;
-            border-bottom: 1px solid var(--line);
+            gap: 8px;
+            margin-bottom: 10px;
         }
 
         .stTabs [data-baseweb="tab"] {
-            height: 42px;
-            padding: 0 16px;
-            background: transparent;
+            height: 44px;
+            padding: 0 18px;
+            border-radius: 8px;
+            background: #ffffff;
+            border: 1px solid var(--line);
             color: var(--muted);
-            font-weight: 700;
-            font-size: 13px;
+            font-weight: 750;
         }
 
         .stTabs [aria-selected="true"] {
-            color: var(--blue) !important;
-            border-bottom: 2px solid var(--blue);
+            color: #ffffff !important;
+            background: var(--navy);
+            border-color: var(--navy);
         }
 
         .stButton > button {
             width: 100%;
-            min-height: 42px;
+            min-height: 44px;
             border-radius: 8px;
-            border: 1px solid var(--blue);
-            background: var(--blue);
+            border: 1px solid var(--navy);
+            background: var(--navy);
             color: #ffffff;
-            font-weight: 750;
+            font-weight: 800;
         }
 
         .stButton > button:hover {
-            border-color: #60a5fa;
-            background: #2563eb;
+            border-color: #1d4ed8;
+            background: #1d4ed8;
             color: #ffffff;
-        }
-
-        .stButton > button:disabled {
-            border-color: var(--line);
-            background: var(--panel-2);
-            color: var(--muted);
-        }
-
-        div[data-testid="stTextInput"] input,
-        div[data-testid="stNumberInput"] input,
-        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
-        div[data-testid="stFileUploader"] section {
-            background: var(--panel-2) !important;
-            border: 1px solid var(--line) !important;
-            color: var(--ink) !important;
-            border-radius: 8px !important;
-        }
-
-        div[data-testid="stFileUploader"] section button {
-            background: var(--panel) !important;
-            color: var(--ink) !important;
-            border: 1px solid var(--line) !important;
         }
     </style>
     """,
@@ -776,284 +625,207 @@ st.markdown(
 )
 
 
-# ---------------------------------------------------------------------------
-# Sidebar — TARGET LAB / thresholds / image upload / run
-# ---------------------------------------------------------------------------
+target_lab = get_target_lab()
+target_text = "image mean" if target_lab is None else f"L {target_lab[0]:.1f} / a {target_lab[1]:.1f} / b {target_lab[2]:.1f}"
 
-with st.sidebar:
-    st.markdown('<div class="sidebar-eyebrow">SNACK QC · MULTI-MODULE INSTRUMENT</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="sidebar-group-title" style="margin-top:0;border-top:none;padding-top:0;">기준값 · TARGET LAB</div>', unsafe_allow_html=True)
-
-    use_target_lab = st.checkbox("기준 Lab 값 사용 (해제 시 이미지 평균 기준)", value=True)
-
-    target_l = st.slider("L* 명도", 0.0, 255.0, float(TARGET_L_DEFAULT), 1.0)
-    target_a = st.slider("a* 적색도", 0.0, 255.0, float(TARGET_A_DEFAULT), 1.0)
-    target_b = st.slider("b* 황색도", 0.0, 255.0, float(TARGET_B_DEFAULT), 1.0)
-
-    st.markdown('<div class="sidebar-group-title">판정 기준</div>', unsafe_allow_html=True)
-    review_threshold = st.number_input(
-        "경고 알람 (Mean ΔE)",
-        min_value=0.0,
-        value=float(REVIEW_THRESHOLD_DEFAULT),
-        step=0.5,
-    )
-    st.caption(f"평균 ΔE가 이 값을 초과하면 관리 요망(REVIEW)으로, {NG_THRESHOLD:.1f} 이상이면 불량(NG)으로 판정합니다.")
-
-    st.markdown('<div class="sidebar-group-title">분석 이미지</div>', unsafe_allow_html=True)
-    uploaded_file = st.file_uploader(
-        "이미지 파일",
-        type=["jpg", "jpeg", "png"],
-        label_visibility="collapsed",
-    )
-
-    run_clicked = st.button("분석 실행", disabled=uploaded_file is None)
-
-
-if "result" not in st.session_state:
-    st.session_state.result = None
-if "result_error" not in st.session_state:
-    st.session_state.result_error = None
-
-if run_clicked and uploaded_file is not None:
-    try:
-        file_bytes = np.frombuffer(uploaded_file.getvalue(), dtype=np.uint8)
-        original_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-
-        if original_img is None:
-            st.session_state.result = None
-            st.session_state.result_error = "이미지를 읽지 못했습니다. JPG 또는 PNG 파일을 다시 업로드해주세요."
-        else:
-            target_lab = (
-                np.array([target_l, target_a, target_b], dtype=np.float32)
-                if use_target_lab
-                else None
-            )
-            with st.spinner("고정밀 AI 마스킹과 색차 분석을 실행 중입니다..."):
-                ai_session = load_ai_model(REMBG_MODEL)
-                result = analyze_image(original_img, ai_session, target_lab, review_threshold)
-            st.session_state.result = result
-            st.session_state.result_error = None
-            del original_img
-            gc.collect()
-    except Exception as e:
-        st.session_state.result = None
-        st.session_state.result_error = str(e)
-
-
-result = st.session_state.result
-has_result = result is not None
-
-target_text = (
-    "image mean" if not use_target_lab else f"L {target_l:.1f} / a {target_a:.1f} / b {target_b:.1f}"
-)
-
-header_left, header_right = st.columns([0.8, 0.2])
-with header_left:
-    st.markdown(
-        f"""
-        <div class="report-header" style="margin-bottom:0;">
-            <div>
-                <div class="brand-mark">SNACK QC · MULTI-MODULE INSTRUMENT</div>
-                <div class="report-title">스낵 품질 분석 계기판</div>
-                <div class="report-subtitle">
-                    무광 검은색 배경에서 촬영된 스낵 이미지를 기준 LAB 값과 비교해 색상 편차(ΔE)를
-                    픽셀 단위로 계산합니다.
-                </div>
+st.markdown(
+    f"""
+    <div class="report-header">
+        <div>
+            <div class="brand-mark">Snack Vision QC</div>
+            <div class="report-title">고정밀 완제품 색차 분석 리포트</div>
+            <div class="report-subtitle">
+                고해상도 AI 마스킹과 float Lab 색공간 계산으로 평균색, Delta E 분포, P95 편차를 산출합니다.
+                마스크 경계 픽셀은 분석에서 제외해 배경 혼입을 줄였습니다.
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
-with header_right:
-    st.markdown("<div style='height: 22px'></div>", unsafe_allow_html=True)
-    render_status_pill("분석 완료" if has_result else "분석 대기", active=has_result)
+        <div class="model-strip">
+            <div>Precision Profile</div>
+            <span>Mask resolution: {MASK_DIM}px</span>
+            <span>Color analysis: {ANALYSIS_DIM}px</span>
+            <span>Segmentation model: {REMBG_MODEL}</span>
+            <span>Reference: {target_text}</span>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-st.write("")
 
-tab1, tab2, tab3 = st.tabs(["01 색차 분석", "02 펠릿 크기 분석", "03 기록 관리"])
+tab1, tab2 = st.tabs(["실시간 색차 분석", "누적 품질 통계"])
 
 
 with tab1:
-    if st.session_state.result_error:
-        st.error(st.session_state.result_error)
+    left_col, right_col = st.columns([0.76, 1.24], gap="large")
 
-    kpi_cols = st.columns(3)
-    if has_result:
-        status_meta = result["status_meta"]
-        with kpi_cols[0]:
-            render_kpi_card("MEAN ΔE", f"{result['mean_delta_e']:.2f}", "평균 색차", "blue")
-        with kpi_cols[1]:
-            render_kpi_card("ΔE STD DEV", f"{result['std_delta_e']:.2f}", "색차 표준편차", "neutral")
-        with kpi_cols[2]:
-            render_kpi_card("GRADE", status_meta["grade"], status_meta["grade_desc"], status_meta["tone"])
-    else:
-        with kpi_cols[0]:
-            render_kpi_card("MEAN ΔE", "—", "평균 색차", "neutral")
-        with kpi_cols[1]:
-            render_kpi_card("ΔE STD DEV", "—", "색차 표준편차", "neutral")
-        with kpi_cols[2]:
-            render_kpi_card("GRADE", "—", "품질 판정", "neutral")
-
-    st.write("")
-
-    # 기록 저장
-    st.markdown('<div class="section-heading"><span class="section-number">+</span><span class="section-title">기록 저장</span></div>', unsafe_allow_html=True)
-    with st.container():
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        f_cols = st.columns(5)
-        with f_cols[0]:
-            product_name = st.text_input("제품", placeholder="예: 새우깡", label_visibility="visible")
-        with f_cols[1]:
-            line_name = st.text_input("생산라인", placeholder="예: 후라잉라인")
-        with f_cols[2]:
-            batch_no = st.text_input("배치번호", placeholder="예: B240912-1")
-        with f_cols[3]:
-            shift = st.selectbox("조", ["조간", "야간"])
-        with f_cols[4]:
-            worker = st.text_input("작업자", placeholder="이름")
-        note = st.text_input("메모", placeholder="선택 입력")
-
-        save_col, help_col = st.columns([0.3, 0.7])
-        with save_col:
-            save_clicked = st.button("기록에 저장", disabled=not has_result)
-        with help_col:
-            if not has_result:
-                st.caption("분석을 먼저 실행하세요")
-            else:
-                st.caption("저장 시 LOT 정보, 평균 Lab, Mean ΔE, 판정 결과가 DB에 기록됩니다.")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        if save_clicked and has_result:
-            if supabase is None:
-                st.error("Supabase 환경변수가 설정되지 않았습니다. Railway Variables를 확인해주세요.")
-            else:
-                log_data = {
-                    "lot_number": batch_no or None,
-                    "product": product_name or None,
-                    "line": line_name or None,
-                    "shift": shift,
-                    "worker": worker or None,
-                    "note": note or None,
-                    "avg_l": round(result["avg_l"], 2),
-                    "avg_a": round(result["avg_a"], 2),
-                    "avg_b": round(result["avg_b"], 2),
-                    "delta_e": round(result["mean_delta_e"], 2),
-                    "defect_type": "색상 편차 관리 필요" if result["status_meta"]["status"] == "NG" else "정상",
-                    "status": result["status_meta"]["status"],
-                    "image_path": "web_upload.jpg",
-                }
-                try:
-                    supabase.table("snack_color_logs").insert(log_data).execute()
-                    st.success("Supabase에 검사 결과가 저장되었습니다.")
-                except Exception as e:
-                    st.error(f"저장 실패: {e}")
-
-    st.write("")
-
-    tile_col, map_col = st.columns([1, 1.6], gap="large")
-    with tile_col:
-        render_number_heading("01", "평균 색상 타일")
-        render_color_tile(result["mean_bgr"] if has_result else None, result["sample_pixels"] if has_result else None)
-
-    with map_col:
-        render_number_heading("02", "편차 오버레이 맵")
-        st.markdown('<div class="heatmap-frame">', unsafe_allow_html=True)
-        if has_result:
-            st.image(cv2.cvtColor(result["heatmap_masked"], cv2.COLOR_BGR2RGB), use_container_width=True)
-        else:
-            st.markdown('<div class="heatmap-empty">이미지를 업로드하고 분석을 실행하세요</div>', unsafe_allow_html=True)
-        render_legend()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    st.write("")
-
-    render_number_heading("03", "색상 편차 분포 (ΔE 히스토그램)")
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    if has_result:
-        fig, ax = plt.subplots(figsize=(9.6, 3.2))
-        fig.patch.set_facecolor("#10141f")
-        ax.set_facecolor("#10141f")
-        ax.hist(result["delta_values"], bins=80, color="#3b82f6", edgecolor="#0a0e16", linewidth=0.3)
-        ax.axvline(result["mean_delta_e"], color="#d97706", linewidth=2, label="Mean")
-        ax.axvline(result["p95_delta_e"], color="#ef4444", linewidth=2, label="P95")
-        ax.set_xlabel("Delta E", fontsize=9, color="#7c8598")
-        ax.set_ylabel("Pixel Count", fontsize=9, color="#7c8598")
-        ax.tick_params(colors="#7c8598", labelsize=8)
-        ax.grid(axis="y", linestyle="--", alpha=0.15, color="#7c8598")
-        legend = ax.legend(frameon=False, fontsize=8, labelcolor="#e6e9f2")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.spines["left"].set_color("#232a3a")
-        ax.spines["bottom"].set_color("#232a3a")
-        plt.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
-        render_footer_stats(
-            n=result["sample_pixels"],
-            min_v=result["min_delta_e"],
-            max_v=result["max_delta_e"],
-            threshold=result["review_threshold"],
-        )
-    else:
-        st.markdown('<div class="heatmap-empty" style="min-height:220px;">이미지를 업로드하고 분석을 실행하세요</div>', unsafe_allow_html=True)
-        render_footer_stats()
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    if has_result:
-        st.write("")
-        status_meta = result["status_meta"]
+    with left_col:
         st.markdown(
-            f"""
-            <div class="section-card">
-                <div class="section-title">최종 판정: {status_meta["status"]} · {status_meta["label"]}</div>
-                <div class="kpi-helper" style="margin-top:6px;">{status_meta["message"]}</div>
-                <div class="status-summary">
-                    <div><span>Mean Delta E</span><strong>{result['mean_delta_e']:.2f}</strong></div>
-                    <div><span>P95 Delta E</span><strong>{result['p95_delta_e']:.2f}</strong></div>
-                    <div><span>Review Threshold</span><strong>{result['review_threshold']:.1f}</strong></div>
-                    <div><span>NG Threshold</span><strong>{NG_THRESHOLD:.1f}</strong></div>
-                </div>
+            """
+            <div class="upload-note">
+                <strong>검사 이미지 업로드</strong>
+                <span>정확도를 위해 배경은 단순하게, 조명은 일정하게 촬영하는 것을 권장합니다.</span>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        with st.expander("시각 검증 (원본 · 전체 마스크 · 분석 코어 마스크)"):
-            img_col1, img_col2, img_col3 = st.columns(3, gap="medium")
-            with img_col1:
-                st.markdown("**Raw Image**")
-                st.image(cv2.cvtColor(result["analysis_img"], cv2.COLOR_BGR2RGB), use_container_width=True)
-            with img_col2:
-                st.markdown("**Full AI Mask**")
-                st.image(cv2.cvtColor(result["visual_masked_img"], cv2.COLOR_BGR2RGB), use_container_width=True)
-            with img_col3:
-                st.markdown("**Analysis Core Mask**")
-                st.image(cv2.cvtColor(result["core_masked_img"], cv2.COLOR_BGR2RGB), use_container_width=True)
+        uploaded_file = st.file_uploader(
+            "이미지 파일",
+            type=["jpg", "jpeg", "png"],
+            label_visibility="collapsed",
+        )
+
+        lot_input = st.text_input("LOT NUMBER", "LOT-2026-005")
+
+        render_panel_title("분석 조건", "Railway Variables에서 기준값과 해상도를 조정할 수 있습니다.")
+        config_cols = st.columns(2)
+        with config_cols[0]:
+            render_kpi("Review", f">= {REVIEW_THRESHOLD:.1f}", "검토 필요 기준", "warning")
+        with config_cols[1]:
+            render_kpi("NG", f">= {NG_THRESHOLD:.1f}", "관리 한계 기준", "danger")
+
+        st.caption(
+            "기준색 비교가 필요하면 TARGET_L, TARGET_A, TARGET_B 값을 Railway Variables에 입력하세요."
+        )
+
+    with right_col:
+        if uploaded_file is None:
+            st.markdown(
+                """
+                <div class="section-card">
+                    <div class="panel-heading">분석 결과 대기</div>
+                    <div class="panel-caption" style="margin-top: 8px;">
+                        이미지를 업로드하면 고정밀 마스킹, Delta E 분포, 평균 Lab, 판정 결과가 표시됩니다.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            try:
+                file_bytes = np.frombuffer(uploaded_file.getvalue(), dtype=np.uint8)
+                original_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+                if original_img is None:
+                    st.error("이미지를 읽지 못했습니다. JPG 또는 PNG 파일을 다시 업로드해주세요.")
+                    st.stop()
+
+                with st.spinner("고정밀 AI 마스킹과 색차 분석을 실행 중입니다..."):
+                    ai_session = load_ai_model(REMBG_MODEL)
+                    result = analyze_image(original_img, ai_session)
+
+                analysis_img = result["analysis_img"]
+                visual_masked_img = result["visual_masked_img"]
+                core_masked_img = result["core_masked_img"]
+                heatmap_masked = result["heatmap_masked"]
+                delta_values = result["delta_values"]
+                mean_bgr = result["mean_bgr"]
+                avg_l = result["avg_l"]
+                avg_a = result["avg_a"]
+                avg_b = result["avg_b"]
+                mean_delta_e = result["mean_delta_e"]
+                std_delta_e = result["std_delta_e"]
+                p95_delta_e = result["p95_delta_e"]
+                sample_pixels = result["sample_pixels"]
+                analysis_mode = result["analysis_mode"]
+                status_meta = calculate_status(mean_delta_e)
+
+                kpi_cols = st.columns(4)
+                with kpi_cols[0]:
+                    render_kpi("Final Status", status_meta["status"], status_meta["label"], status_meta["tone"])
+                with kpi_cols[1]:
+                    render_kpi("Mean Delta E", f"{mean_delta_e:.2f}", analysis_mode, "blue")
+                with kpi_cols[2]:
+                    render_kpi("P95 Delta E", f"{p95_delta_e:.2f}", "상위 5% 편차 경계", "neutral")
+                with kpi_cols[3]:
+                    render_kpi("Sample Pixels", f"{sample_pixels:,}", "정밀 마스크 내부 픽셀", "blue")
+
+                st.write("")
+                status_col, color_col = st.columns([1, 1], gap="large")
+                with status_col:
+                    render_status_panel(status_meta, mean_delta_e, std_delta_e, p95_delta_e)
+                with color_col:
+                    render_color_chip(mean_bgr, avg_l, avg_a, avg_b)
+
+                    fig, ax = plt.subplots(figsize=(4.8, 3.2))
+                    ax.hist(delta_values, bins=80, color="#0f2742", edgecolor="white", linewidth=0.35)
+                    ax.axvline(mean_delta_e, color="#d97706", linewidth=2, label="Mean")
+                    ax.axvline(p95_delta_e, color="#dc2626", linewidth=2, label="P95")
+                    ax.set_xlabel("Delta E", fontsize=9)
+                    ax.set_ylabel("Pixel Count", fontsize=9)
+                    ax.grid(axis="y", linestyle="--", alpha=0.24)
+                    ax.legend(frameon=False, fontsize=8)
+                    ax.spines["top"].set_visible(False)
+                    ax.spines["right"].set_visible(False)
+                    fig.patch.set_facecolor("#ffffff")
+                    ax.set_facecolor("#ffffff")
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close(fig)
+
+                render_panel_title("시각 검증", "원본, 전체 마스크, 분석 코어 마스크, 실제 Delta E 히트맵을 비교합니다.")
+                img_col1, img_col2 = st.columns(2, gap="medium")
+                with img_col1:
+                    st.markdown("**Raw Image**")
+                    st.image(cv2.cvtColor(analysis_img, cv2.COLOR_BGR2RGB), use_container_width=True)
+                with img_col2:
+                    st.markdown("**Full AI Mask**")
+                    st.image(cv2.cvtColor(visual_masked_img, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+                img_col3, img_col4 = st.columns(2, gap="medium")
+                with img_col3:
+                    st.markdown("**Analysis Core Mask**")
+                    st.image(cv2.cvtColor(core_masked_img, cv2.COLOR_BGR2RGB), use_container_width=True)
+                with img_col4:
+                    st.markdown("**Delta E Heatmap**")
+                    st.image(cv2.cvtColor(heatmap_masked, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+                st.write("")
+                save_col, note_col = st.columns([0.35, 0.65])
+                with save_col:
+                    save_clicked = st.button("검사 결과 DB 저장")
+                with note_col:
+                    st.caption("저장 시 LOT 번호, 평균 Lab, Mean/P95 Delta E, 판정 상태가 Supabase에 기록됩니다.")
+
+                if save_clicked:
+                    if supabase is None:
+                        st.error("Supabase 환경변수가 설정되지 않았습니다. Railway Variables를 확인해주세요.")
+                    else:
+                        log_data = {
+                            "lot_number": lot_input,
+                            "avg_l": round(avg_l, 2),
+                            "avg_a": round(avg_a, 2),
+                            "avg_b": round(avg_b, 2),
+                            "delta_e": round(mean_delta_e, 2),
+                            "defect_type": "색상 편차 관리 필요" if status_meta["status"] == "NG" else "정상",
+                            "status": status_meta["status"],
+                            "image_path": "web_upload.jpg",
+                        }
+                        try:
+                            supabase.table("snack_color_logs").insert(log_data).execute()
+                            st.success("Supabase에 검사 결과가 저장되었습니다.")
+                        except Exception as e:
+                            st.error(f"저장 실패: {e}")
+
+                del original_img, analysis_img, visual_masked_img, core_masked_img
+                del heatmap_masked, delta_values, result
+                gc.collect()
+
+            except Exception as e:
+                st.error("분석 중 오류가 발생했습니다.")
+                st.exception(e)
 
 
 with tab2:
-    st.markdown(
-        """
-        <div class="placeholder-card">
-            <strong>펠릿 크기 분석 모듈</strong>
-            이 모듈은 준비 중입니다. 곧 펠릿(스낵 조각) 크기 균일도 분석 기능이 추가될 예정입니다.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-with tab3:
     top_cols = st.columns([0.7, 0.3])
     with top_cols[0]:
-        render_number_heading("03", "기록 관리")
+        render_panel_title("누적 품질 통계", "Supabase에 저장된 LOT 검사 이력을 기준으로 품질 추세를 확인합니다.")
     with top_cols[1]:
         if st.button("DB 동기화"):
             st.rerun()
 
     if supabase is None:
-        st.warning("Supabase 환경변수가 설정되지 않아 기록을 불러올 수 없습니다.")
+        st.warning("Supabase 환경변수가 설정되지 않아 통계 DB를 불러올 수 없습니다.")
     else:
         try:
             response = (
@@ -1078,18 +850,18 @@ with tab3:
 
                 stat_cols = st.columns(4)
                 with stat_cols[0]:
-                    render_kpi_card("Total Inspections", f"{total_count:,}", "누적 검사 LOT", "blue")
+                    render_kpi("Total Inspections", f"{total_count:,}", "누적 검사 LOT", "blue")
                 with stat_cols[1]:
-                    render_kpi_card("Action Rate", f"{action_rate:.1f}%", "REVIEW + NG 비율", "warning" if action_rate > 0 else "success")
+                    render_kpi("Action Rate", f"{action_rate:.1f}%", "REVIEW + NG 비율", "warning" if action_rate > 0 else "success")
                 with stat_cols[2]:
-                    render_kpi_card("Average Delta E", f"{avg_delta_e:.2f}", "누적 평균 색차", "neutral")
+                    render_kpi("Average Delta E", f"{avg_delta_e:.2f}", "누적 평균 색차", "neutral")
                 with stat_cols[3]:
-                    render_kpi_card("Latest Status", str(recent_status), "최근 LOT 판정", "success" if recent_status == "OK" else "warning")
+                    render_kpi("Latest Status", str(recent_status), "최근 LOT 판정", "success" if recent_status == "OK" else "warning")
 
                 st.write("")
                 if "lot_number" in df.columns and "delta_e" in df.columns:
                     chart_df = df[["lot_number", "delta_e"]].set_index("lot_number")
-                    st.line_chart(chart_df, color="#3b82f6")
+                    st.line_chart(chart_df, color="#0f2742")
 
                 st.write("")
                 st.dataframe(
@@ -1098,17 +870,12 @@ with tab3:
                         [
                             "created_at",
                             "lot_number",
-                            "product",
-                            "line",
-                            "shift",
-                            "worker",
                             "avg_l",
                             "avg_a",
                             "avg_b",
                             "delta_e",
                             "defect_type",
                             "status",
-                            "note",
                         ],
                     ),
                     use_container_width=True,
