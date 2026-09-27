@@ -29,11 +29,11 @@ SUPABASE_URL = get_config("SUPABASE_URL")
 SUPABASE_KEY = get_config("SUPABASE_KEY")
 
 # ==========================================
-# [수정] 고정밀 누끼 AI 및 초고해상도 복구
+# 고정밀 누끼 AI 및 초고해상도 설정
 # ==========================================
 MASK_DIM = 2200
 ANALYSIS_DIM = 2600
-REMBG_MODEL = "isnet-general-use"  # 뭉툭하게 따이는 현상 해결을 위한 고성능 모델 복구
+REMBG_MODEL = "isnet-general-use"
 
 MASK_THRESHOLD = 128
 MASK_KERNEL_SIZE = 5
@@ -72,7 +72,6 @@ def create_precise_masks(original_img, analysis_img, session):
 
     alpha = no_bg_img[:, :, 3].astype(np.uint8)
     
-    # [수정] 경계선 픽셀 보간법을 고정밀(CUBIC)로 복구
     resized_alpha = cv2.resize(
         alpha,
         (analysis_img.shape[1], analysis_img.shape[0]),
@@ -251,7 +250,6 @@ st.markdown(
         
         .section-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
         
-        /* [수정] 타일 카드 크기를 히스토그램 박스와 유사하게 맞춤 */
         .tile-card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 20px; min-height: 400px; display: flex; flex-direction: column; }
         .tile-swatch { width: 100%; flex: 1; min-height: 250px; border-radius: 8px; border: 1px solid var(--line); }
         .tile-swatch-empty { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; background: repeating-linear-gradient(45deg, #0d1220, #0d1220 10px, #10141f 10px, #10141f 20px); }
@@ -435,8 +433,8 @@ with tab1:
         
     with hist_col:
         render_number_heading("02", "색상 편차 분포 (ΔE 히스토그램)")
-        st.markdown('<div class="section-card" style="min-height: 400px; display: flex; flex-direction: column; justify-content: center;">', unsafe_allow_html=True)
         if has_result:
+            # HTML 박스로 인한 위쪽 빈 여백 발생 현상 제거
             fig, ax = plt.subplots(figsize=(6, 3.8))
             fig.patch.set_facecolor("#10141f")
             ax.set_facecolor("#10141f")
@@ -453,15 +451,15 @@ with tab1:
             ax.spines["left"].set_color("#232a3a")
             ax.spines["bottom"].set_color("#232a3a")
             plt.tight_layout()
+            
             st.pyplot(fig, use_container_width=True)
             plt.close(fig)
             render_footer_stats(n=result["sample_pixels"], min_v=result["min_delta_e"], max_v=result["max_delta_e"], threshold=result["review_threshold"])
         else:
-            st.markdown('<div class="heatmap-empty">이미지를 업로드하고 분석을 실행하세요</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-card"><div class="heatmap-empty" style="min-height: 400px;">이미지를 업로드하고 분석을 실행하세요</div></div>', unsafe_allow_html=True)
             render_footer_stats()
-        st.markdown('</div>', unsafe_allow_html=True)
 
-    # 3. 시각 검증 패널 (기존 맵 자리를 대체하여 위로 배치)
+    # 3. 시각 검증 패널 
     st.write("")
     render_number_heading("03", "시각 검증 (Visual Validation)")
     if has_result:
@@ -481,7 +479,7 @@ with tab1:
     else:
         st.markdown('<div class="section-card"><div class="heatmap-empty" style="min-height:200px;">이미지를 업로드하고 분석을 실행하세요</div></div>', unsafe_allow_html=True)
 
-    # 4. 기록 저장 섹션 (최하단 이동)
+    # 4. 기록 저장 섹션 (최하단)
     st.write("")
     st.markdown('<div class="section-heading"><span class="section-number">+</span><span class="section-title">기록 저장</span></div>', unsafe_allow_html=True)
     with st.container():
