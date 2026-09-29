@@ -1,5 +1,7 @@
 import os
 import gc
+import io
+import base64
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
@@ -218,7 +220,6 @@ st.markdown(
         .stApp { background: var(--bg); color: var(--ink); }
         .block-container { max-width: 1400px; padding-top: 1.4rem; padding-bottom: 3rem; }
         
-        /* [수정] header는 숨기지 않고 배경만 투명하게 만들어 사이드바 화살표(>)를 살림 */
         #MainMenu, footer { visibility: hidden; }
         header { background-color: transparent !important; }
         
@@ -324,13 +325,6 @@ def render_color_tile(mean_bgr=None, sample_pixels=None, avg_l=None, avg_a=None,
 
 def render_legend():
     st.markdown('<div class="legend-row"><span class="legend-item"><span class="legend-dot legend-green"></span>우수 (ΔE&lt;3)</span><span class="legend-item"><span class="legend-dot legend-blue"></span>합격</span><span class="legend-item"><span class="legend-dot legend-amber"></span>경계 (시즈닝 편중 의심)</span><span class="legend-item"><span class="legend-dot legend-red"></span>불량 (뭉침/편중)</span></div>', unsafe_allow_html=True)
-
-def render_footer_stats(n=None, min_v=None, max_v=None, threshold=None):
-    n_text = f"{n:,}" if n is not None else "—"
-    min_text = f"{min_v:.2f}" if min_v is not None else "—"
-    max_text = f"{max_v:.2f}" if max_v is not None else "—"
-    th_text = f"{threshold:.1f}" if threshold is not None else "—"
-    st.markdown(f'<div class="footer-stats"><span>N <strong>{n_text}</strong> px</span><span>MIN <strong>{min_text}</strong></span><span>MAX <strong>{max_text}</strong></span><span>THRESHOLD <strong>{th_text}</strong></span></div>', unsafe_allow_html=True)
 
 supabase = get_supabase_client()
 
@@ -451,6 +445,8 @@ with tab1:
         
     with hist_col:
         render_number_heading("02", "색상 편차 분포 (ΔE 히스토그램)")
+        
+        # [수정] HTML 상자 안에 그래프를 완벽하게 집어넣기 위해, 파이썬 그래프를 Base64 이미지로 렌더링
         if has_result:
             fig, ax = plt.subplots(figsize=(6, 3.8))
             fig.patch.set_facecolor("#10141f")
@@ -469,14 +465,42 @@ with tab1:
             ax.spines["bottom"].set_color("#232a3a")
             plt.tight_layout()
             
-            st.markdown('<div class="section-card" style="min-height: 400px; display: flex; flex-direction: column; justify-content: center;">', unsafe_allow_html=True)
-            st.pyplot(fig, use_container_width=True)
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", bbox_inches="tight", dpi=100, facecolor="#10141f")
+            buf.seek(0)
+            img_base64 = base64.b64encode(buf.read()).decode("utf-8")
             plt.close(fig)
-            render_footer_stats(n=result["sample_pixels"], min_v=result["min_delta_e"], max_v=result["max_delta_e"], threshold=result["review_threshold"])
-            st.markdown('</div>', unsafe_allow_html=True)
+            
+            n_text = f"{result['sample_pixels']:,}"
+            min_text = f"{result['min_delta_e']:.2f}"
+            max_text = f"{result['max_delta_e']:.2f}"
+            th_text = f"{result['review_threshold']:.1f}"
+            
+            html_str = f"""
+            <div class="section-card" style="min-height: 400px; display: flex; flex-direction: column; justify-content: space-between; padding: 20px;">
+                <img src="data:image/png;base64,{img_base64}" style="width: 100%; border-radius: 8px;">
+                <div class="footer-stats" style="border-top: 1px solid var(--line); padding-top: 12px; margin-top: auto;">
+                    <span>N <strong>{n_text}</strong> px</span>
+                    <span>MIN <strong>{min_text}</strong></span>
+                    <span>MAX <strong>{max_text}</strong></span>
+                    <span>THRESHOLD <strong>{th_text}</strong></span>
+                </div>
+            </div>
+            """
+            st.markdown(html_str, unsafe_allow_html=True)
         else:
-            st.markdown('<div class="section-card"><div class="heatmap-empty" style="min-height: 400px;">이미지를 업로드하고 분석을 실행하세요</div></div>', unsafe_allow_html=True)
-            render_footer_stats()
+            html_str = """
+            <div class="section-card" style="min-height: 400px; display: flex; flex-direction: column; justify-content: space-between; padding: 20px;">
+                <div class="heatmap-empty" style="flex: 1; border-radius: 8px; margin-bottom: 20px;">이미지를 업로드하고 분석을 실행하세요</div>
+                <div class="footer-stats" style="border-top: 1px solid var(--line); padding-top: 12px;">
+                    <span>N <strong>—</strong> px</span>
+                    <span>MIN <strong>—</strong></span>
+                    <span>MAX <strong>—</strong></span>
+                    <span>THRESHOLD <strong>—</strong></span>
+                </div>
+            </div>
+            """
+            st.markdown(html_str, unsafe_allow_html=True)
 
     # 3. 시각 검증 패널 
     st.write("")
