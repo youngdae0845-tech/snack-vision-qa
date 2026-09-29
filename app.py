@@ -197,7 +197,7 @@ def analyze_image(original_img, session, target_lab, review_threshold):
     return result
 
 # ---------------------------------------------------------------------------
-# UI CSS (다크 테마 계기판 스타일)
+# UI CSS (사이드바 복구 및 디자인 최적화)
 # ---------------------------------------------------------------------------
 st.markdown(
     """
@@ -217,7 +217,10 @@ st.markdown(
         }
         .stApp { background: var(--bg); color: var(--ink); }
         .block-container { max-width: 1400px; padding-top: 1.4rem; padding-bottom: 3rem; }
-        #MainMenu, footer, header { visibility: hidden; }
+        
+        /* [수정] header는 숨기지 않고 배경만 투명하게 만들어 사이드바 화살표(>)를 살림 */
+        #MainMenu, footer { visibility: hidden; }
+        header { background-color: transparent !important; }
         
         section[data-testid="stSidebar"] { background: var(--panel); border-right: 1px solid var(--line); }
         section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] p, section[data-testid="stSidebar"] span { color: var(--ink) !important; }
@@ -300,12 +303,24 @@ def render_status_pill(text, active=False):
     dot = "dot-active" if active else "dot-idle"
     st.markdown(f'<div class="status-pill"><span class="{dot}"></span>{text}</div>', unsafe_allow_html=True)
 
-def render_color_tile(mean_bgr=None, sample_pixels=None):
+def render_color_tile(mean_bgr=None, sample_pixels=None, avg_l=None, avg_a=None, avg_b=None):
     if mean_bgr is None:
-        st.markdown('<div class="tile-card"><div class="tile-swatch tile-swatch-empty">이미지 대기 중</div><div class="tile-meta"><div><span>RGB</span><strong>—</strong></div><div><span>PIXELS</span><strong>—</strong></div></div></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="tile-card"><div class="tile-swatch tile-swatch-empty">이미지 대기 중</div>'
+            '<div class="tile-meta">'
+            '<div><span>RGB</span><strong>—</strong></div>'
+            '<div><span>L* a* b*</span><strong>—</strong></div>'
+            '<div><span>PIXELS</span><strong>—</strong></div>'
+            '</div></div>', unsafe_allow_html=True)
         return
     r, g, b = int(np.clip(mean_bgr[2], 0, 255)), int(np.clip(mean_bgr[1], 0, 255)), int(np.clip(mean_bgr[0], 0, 255))
-    st.markdown(f'<div class="tile-card"><div class="tile-swatch" style="background: rgb({r}, {g}, {b});"></div><div class="tile-meta"><div><span>RGB</span><strong>{r}, {g}, {b}</strong></div><div><span>PIXELS</span><strong>{sample_pixels:,}</strong></div></div></div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="tile-card"><div class="tile-swatch" style="background: rgb({r}, {g}, {b});"></div>'
+        f'<div class="tile-meta">'
+        f'<div><span>RGB</span><strong>{r}, {g}, {b}</strong></div>'
+        f'<div><span>L* a* b*</span><strong>{avg_l:.1f}, {avg_a:.1f}, {avg_b:.1f}</strong></div>'
+        f'<div><span>PIXELS</span><strong>{sample_pixels:,}</strong></div>'
+        f'</div></div>', unsafe_allow_html=True)
 
 def render_legend():
     st.markdown('<div class="legend-row"><span class="legend-item"><span class="legend-dot legend-green"></span>우수 (ΔE&lt;3)</span><span class="legend-item"><span class="legend-dot legend-blue"></span>합격</span><span class="legend-item"><span class="legend-dot legend-amber"></span>경계 (시즈닝 편중 의심)</span><span class="legend-item"><span class="legend-dot legend-red"></span>불량 (뭉침/편중)</span></div>', unsafe_allow_html=True)
@@ -429,12 +444,14 @@ with tab1:
     
     with tile_col:
         render_number_heading("01", "평균 색상 타일")
-        render_color_tile(result["mean_bgr"] if has_result else None, result["sample_pixels"] if has_result else None)
+        if has_result:
+            render_color_tile(result["mean_bgr"], result["sample_pixels"], result["avg_l"], result["avg_a"], result["avg_b"])
+        else:
+            render_color_tile()
         
     with hist_col:
         render_number_heading("02", "색상 편차 분포 (ΔE 히스토그램)")
         if has_result:
-            # HTML 박스로 인한 위쪽 빈 여백 발생 현상 제거
             fig, ax = plt.subplots(figsize=(6, 3.8))
             fig.patch.set_facecolor("#10141f")
             ax.set_facecolor("#10141f")
@@ -452,9 +469,11 @@ with tab1:
             ax.spines["bottom"].set_color("#232a3a")
             plt.tight_layout()
             
+            st.markdown('<div class="section-card" style="min-height: 400px; display: flex; flex-direction: column; justify-content: center;">', unsafe_allow_html=True)
             st.pyplot(fig, use_container_width=True)
             plt.close(fig)
             render_footer_stats(n=result["sample_pixels"], min_v=result["min_delta_e"], max_v=result["max_delta_e"], threshold=result["review_threshold"])
+            st.markdown('</div>', unsafe_allow_html=True)
         else:
             st.markdown('<div class="section-card"><div class="heatmap-empty" style="min-height: 400px;">이미지를 업로드하고 분석을 실행하세요</div></div>', unsafe_allow_html=True)
             render_footer_stats()
